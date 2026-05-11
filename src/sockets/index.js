@@ -34,9 +34,9 @@ module.exports = (io) => {
 
   io.on('connection', (socket) => {
     const authType = socket.data.authType;
+    const { user, guest } = socket.data;
 
     if (authType === 'user') {
-      const { user } = socket.data;
       logger.info('User client connected', {
         socketId: socket.id,
         userId: user.sub,
@@ -60,7 +60,6 @@ module.exports = (io) => {
         socket.join('support:staff');
       }
     } else if (authType === 'guest') {
-      const { guest } = socket.data;
       logger.info('Guest client connected', {
         socketId: socket.id,
         sessionId: guest.session_id,
@@ -88,11 +87,14 @@ module.exports = (io) => {
         }
 
         // Check access
-        if (user.role === 'user') {
+        if (authType === 'user') {
           const [conv] = await pool.execute('SELECT user_id FROM support_conversations WHERE id = ?', [conversation_id]);
           if (conv.length === 0 || conv[0].user_id !== user.sub) {
             return socket.emit('support:error', { message: 'Access denied' });
           }
+        } else if (authType === 'guest') {
+          // Guests cannot manually join, they join on connect
+          return socket.emit('support:error', { message: 'Guests cannot manually join conversations' });
         }
 
         socket.join(`conversation:${conversation_id}`);
@@ -111,11 +113,21 @@ module.exports = (io) => {
           return socket.emit('support:error', { message: 'conversation_id required' });
         }
 
+        const authType = socket.data.authType;
+        let userId, role;
+        if (authType === 'user') {
+          userId = socket.data.user.sub;
+          role = socket.data.user.role;
+        } else if (authType === 'guest') {
+          userId = socket.data.guest.session_id;
+          role = 'guest';
+        }
+
         // Broadcast to conversation room excluding sender
         io.to(`conversation:${conversation_id}`).except(socket.id).emit('support:typing', {
           conversation_id,
-          user_id: user.sub,
-          role: user.role,
+          user_id: userId,
+          role,
           is_typing: !!is_typing
         });
       } catch (error) {
@@ -142,7 +154,6 @@ module.exports = (io) => {
         let senderType, senderId;
 
         if (authType === 'user') {
-          const { user } = socket.data;
           senderType = user.role === 'user' ? 'user' : user.role;
           senderId = user.sub;
 
@@ -160,15 +171,12 @@ module.exports = (io) => {
             logger.info('New user conversation created', { conversationId: convId, userId: user.sub });
           } else {
             // Check access
-            if (user.role === 'user') {
-              const [conv] = await pool.execute('SELECT user_id FROM support_conversations WHERE id = ?', [convId]);
-              if (conv.length === 0 || conv[0].user_id !== user.sub) {
-                return socket.emit('support:error', { message: 'Access denied' });
-              }
+            const [conv] = await pool.execute('SELECT user_id FROM support_conversations WHERE id = ?', [convId]);
+            if (conv.length === 0 || conv[0].user_id !== user.sub) {
+              return socket.emit('support:error', { message: 'Access denied' });
             }
           }
         } else if (authType === 'guest') {
-          const { guest } = socket.data;
           senderType = 'guest';
           senderId = guest.session_id;
 
@@ -221,45 +229,24 @@ module.exports = (io) => {
           authType,
           senderId
         });
-      } catch (error) {
-        logger.error('Error sending message', { error: error.message, socketId: socket.id });
-        socket.emit('support:error', { message: 'Failed to send message' });
       }
-    });
-
-        // If sender is staff, also broadcast to staff room excluding sender
-        if (user.role !== 'user') {
-          io.to('support:staff').except(socket.id).emit('support:message:new', message);
-          logger.debug('Broadcasted message to staff room', {
-            room: 'support:staff',
-            socketId: socket.id,
-            messageId: message.id,
-            excludedSender: true
-          });
-        }
-
-        socket.emit('support:message:sent', { message_id: message.id });
-
-        logger.info('Message sent', {
-          messageId: message.id,
-          conversationId: convId,
-          userId: user.sub,
-          role: user.role
-        });
-      } catch (error) {
+      catch (error) {
         logger.error('Error sending message', { error: error.message, socketId: socket.id });
         socket.emit('support:error', { message: 'Failed to send message' });
       }
     });
 
     socket.on('disconnect', (reason) => {
-      logger.info('Client disconnected', {
-        socketId: socket.id,
-        userId: user.sub,
-        role: user.role,
-        companyId: user.company_id,
-        reason
-      });
+      const logData = { socketId: socket.id, reason };
+      if (authType === 'user') {
+        logData.userId = socket.data.user.sub;
+        logData.role = socket.data.user.role;
+        logData.companyId = socket.data.user.company_id;
+      } else if (authType === 'guest') {
+        logData.sessionId = socket.data.guest.session_id;
+        logData.conversationId = socket.data.guest.conversation_id;
+      }
+      logger.info('Client disconnected', logData);
     });
   });
 };
