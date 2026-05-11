@@ -1,21 +1,21 @@
 const logger = require('../utils/logger');
-const { verifyChatToken } = require('../utils/chatToken');
-const { verifyGuestToken } = require('../utils/guestToken');
-const pool = require('../config/database');
+const { verifyAuthToken, verifyGuestToken } = require('../services/tokenService');
+const pool = require('../config/db');
 
 module.exports = (io) => {
   // Authentication middleware
   io.use((socket, next) => {
-    const chatToken = socket.handshake.auth?.token;
+    const token = socket.handshake.auth?.token;
     const guestToken = socket.handshake.auth?.guest_token;
 
-    if (chatToken) {
+    if (token) {
       try {
-        const user = verifyChatToken(chatToken);
+        const user = verifyAuthToken(token);
         socket.data.user = user;
-        socket.data.authType = 'user';
+        socket.data.authType = user.role === 'user' ? 'user' : 'staff';
         next();
       } catch (error) {
+        logger.info('socket_auth_failed', { error: 'invalid auth token' });
         return next(new Error('Invalid authentication token'));
       }
     } else if (guestToken) {
@@ -25,228 +25,141 @@ module.exports = (io) => {
         socket.data.authType = 'guest';
         next();
       } catch (error) {
+        logger.info('socket_auth_failed', { error: 'invalid guest token' });
         return next(new Error('Invalid guest token'));
       }
     } else {
+      logger.info('socket_auth_failed', { error: 'no token provided' });
       return next(new Error('Authentication token required'));
     }
   });
 
   io.on('connection', (socket) => {
+    logger.info('socket_connected', { auth_type: socket.data.authType });
+
     const authType = socket.data.authType;
     const { user, guest } = socket.data;
 
-    if (authType === 'user') {
-      logger.info('User client connected', {
-        socketId: socket.id,
-        userId: user.sub,
-        role: user.role,
-        companyId: user.company_id
-      });
-
+    if (authType === 'user' || authType === 'staff') {
       socket.emit('support:connected', {
         ok: true,
-        user_id: user.sub,
-        role: user.role,
-        company_id: user.company_id
+        auth_type: authType,
+        conversation_id: null // No specific conversation on connect
       });
 
-      // Join rooms
+      // Join user room
       socket.join(`user:${user.sub}`);
-      if (user.company_id) {
-        socket.join(`company:${user.company_id}`);
-      }
-      if (user.role === 'admin' || user.role === 'support') {
-        socket.join('support:staff');
+      // Staff join staff room
+      if (authType === 'staff') {
+        socket.join('staff');
       }
     } else if (authType === 'guest') {
-      logger.info('Guest client connected', {
-        socketId: socket.id,
-        sessionId: guest.session_id,
-        conversationId: guest.conversation_id
-      });
-
       socket.emit('support:connected', {
         ok: true,
-        guest_session_id: guest.session_id,
+        auth_type: 'guest',
         conversation_id: guest.conversation_id
       });
 
-      // Join conversation room if available
-      if (guest.conversation_id) {
-        socket.join(`conversation:${guest.conversation_id}`);
-      }
+      // Join conversation room
+      socket.join(`conversation:${guest.conversation_id}`);
     }
-
-    // support:conversation:join
-    socket.on('support:conversation:join', async (data) => {
-      try {
-        const { conversation_id } = data;
-        if (!conversation_id) {
-          return socket.emit('support:error', { message: 'conversation_id required' });
-        }
-
-        // Check access
-        if (authType === 'user') {
-          const [conv] = await pool.execute('SELECT user_id FROM support_conversations WHERE id = ?', [conversation_id]);
-          if (conv.length === 0 || conv[0].user_id !== user.sub) {
-            return socket.emit('support:error', { message: 'Access denied' });
-          }
-        } else if (authType === 'guest') {
-          // Guests cannot manually join, they join on connect
-          return socket.emit('support:error', { message: 'Guests cannot manually join conversations' });
-        }
-
-        socket.join(`conversation:${conversation_id}`);
-        socket.emit('support:conversation:joined', { conversation_id });
-      } catch (error) {
-        logger.error('Error joining conversation', { error: error.message, socketId: socket.id });
-        socket.emit('support:error', { message: 'Failed to join conversation' });
-      }
-    });
 
     // support:typing
     socket.on('support:typing', (data) => {
       try {
         const { conversation_id, is_typing } = data;
         if (!conversation_id) {
-          return socket.emit('support:error', { message: 'conversation_id required' });
-        }
-
-        const authType = socket.data.authType;
-        let userId, role;
-        if (authType === 'user') {
-          userId = socket.data.user.sub;
-          role = socket.data.user.role;
-        } else if (authType === 'guest') {
-          userId = socket.data.guest.session_id;
-          role = 'guest';
+          return socket.emit('support:error', { code: 'VALIDATION_ERROR', message: 'conversation_id required' });
         }
 
         // Broadcast to conversation room excluding sender
         io.to(`conversation:${conversation_id}`).except(socket.id).emit('support:typing', {
           conversation_id,
-          user_id: userId,
-          role,
           is_typing: !!is_typing
         });
       } catch (error) {
         logger.error('Error handling typing', { error: error.message, socketId: socket.id });
-        socket.emit('support:error', { message: 'Failed to update typing status' });
+        socket.emit('support:error', { code: 'INTERNAL_ERROR', message: 'Failed to update typing status' });
       }
     });
 
     // support:message:send
     socket.on('support:message:send', async (data) => {
       try {
-        const { conversation_id, body, subject } = data;
+        logger.info('message_send_started', { conversation_id: data.conversation_id });
+
+        const { conversation_id, body } = data;
         const authType = socket.data.authType;
 
-        if (!body || body.trim().length === 0) {
-          return socket.emit('support:error', { message: 'Message body required' });
+        if (!conversation_id || !body || body.trim().length === 0) {
+          return socket.emit('support:error', { code: 'VALIDATION_ERROR', message: 'conversation_id and body required' });
         }
 
         if (body.length > 5000) {
-          return socket.emit('support:error', { message: 'Message too long (max 5000 characters)' });
+          return socket.emit('support:error', { code: 'VALIDATION_ERROR', message: 'Message too long' });
         }
 
-        let convId = conversation_id;
+        // Validate conversation access
         let senderType, senderId;
+        const [conv] = await pool.execute('SELECT source, user_id, guest_session_id FROM support_conversations WHERE id = ?', [conversation_id]);
+        if (conv.length === 0) {
+          return socket.emit('support:error', { code: 'ACCESS_DENIED', message: 'Conversation not found' });
+        }
 
-        if (authType === 'user') {
-          senderType = user.role === 'user' ? 'user' : user.role;
-          senderId = user.sub;
+        const conversation = conv[0];
 
-          if (!convId) {
-            // Create new conversation for user
-            if (user.role !== 'user') {
-              return socket.emit('support:error', { message: 'conversation_id required for non-users' });
-            }
-
-            const [result] = await pool.execute(
-              'INSERT INTO support_conversations (user_id, company_id, subject, status) VALUES (?, ?, ?, ?)',
-              [user.sub, user.company_id || null, subject || null, 'open']
-            );
-            convId = result.insertId;
-            logger.info('New user conversation created', { conversationId: convId, userId: user.sub });
-          } else {
-            // Check access
-            const [conv] = await pool.execute('SELECT user_id FROM support_conversations WHERE id = ?', [convId]);
-            if (conv.length === 0 || conv[0].user_id !== user.sub) {
-              return socket.emit('support:error', { message: 'Access denied' });
-            }
+        if (authType === 'guest') {
+          if (conversation.source !== 'guest' || conversation.guest_session_id !== guest.session_id) {
+            return socket.emit('support:error', { code: 'ACCESS_DENIED', message: 'Access denied' });
           }
-        } else if (authType === 'guest') {
           senderType = 'guest';
-          senderId = guest.session_id;
-
-          if (!convId || guest.conversation_id !== convId) {
-            return socket.emit('support:error', { message: 'Invalid conversation for guest' });
+          senderId = null;
+        } else if (authType === 'user') {
+          if (conversation.source !== 'authenticated' || conversation.user_id !== user.sub) {
+            return socket.emit('support:error', { code: 'ACCESS_DENIED', message: 'Access denied' });
           }
-
-          // Check access
-          const [conv] = await pool.execute('SELECT guest_session_id FROM support_conversations WHERE id = ?', [convId]);
-          if (conv.length === 0 || conv[0].guest_session_id !== guest.session_id) {
-            return socket.emit('support:error', { message: 'Access denied' });
-          }
+          senderType = 'user';
+          senderId = user.sub;
+        } else if (authType === 'staff') {
+          // Staff can access any conversation
+          senderType = 'staff';
+          senderId = user.sub;
         }
 
         // Insert message
         const [msgResult] = await pool.execute(
-          'INSERT INTO support_messages (conversation_id, sender_type, sender_id, body) VALUES (?, ?, ?, ?)',
-          [convId, senderType, senderId, body.trim()]
+          'INSERT INTO support_messages (conversation_id, sender_type, sender_id, body, created_at) VALUES (?, ?, ?, ?, NOW())',
+          [conversation_id, senderType, senderId, body.trim()]
         );
 
-        // Update conversation last_message_at
-        await pool.execute(
-          'UPDATE support_conversations SET last_message_at = NOW(), updated_at = NOW() WHERE id = ?',
-          [convId]
-        );
+        // Update conversation updated_at
+        await pool.execute('UPDATE support_conversations SET updated_at = NOW() WHERE id = ?', [conversation_id]);
 
-        const message = {
-          id: msgResult.insertId,
-          conversation_id: convId,
-          sender_type: senderType,
-          sender_id: senderId,
-          body: body.trim(),
-          is_internal: 0,
-          created_at: new Date().toISOString()
-        };
+        const messageId = msgResult.insertId;
 
-        // Broadcast to conversation room, excluding sender
-        io.to(`conversation:${convId}`).except(socket.id).emit('support:message:new', message);
-
-        // If sender is staff, also broadcast to staff room excluding sender
-        if (authType === 'user' && socket.data.user.role !== 'user') {
-          io.to('support:staff').except(socket.id).emit('support:message:new', message);
-        }
-
-        socket.emit('support:message:sent', { message_id: message.id });
-
-        logger.info('Message sent', {
-          messageId: message.id,
-          conversationId: convId,
-          authType,
-          senderId
+        // Emit to room
+        io.to(`conversation:${conversation_id}`).emit('support:message:new', {
+          conversation_id,
+          message: {
+            id: messageId,
+            sender_type: senderType,
+            body: body.trim(),
+            created_at: new Date().toISOString()
+          }
         });
-      }
-      catch (error) {
-        logger.error('Error sending message', { error: error.message, socketId: socket.id });
-        socket.emit('support:error', { message: 'Failed to send message' });
+
+        // Emit to sender
+        socket.emit('support:message:sent', { conversation_id, message_id: messageId });
+
+        logger.info('message_send_success', { message_id: messageId });
+      } catch (error) {
+        logger.error('message_send_failed', { error: error.message });
+        socket.emit('support:error', { code: 'INTERNAL_ERROR', message: 'Failed to send message' });
       }
     });
 
     socket.on('disconnect', (reason) => {
-      const logData = { socketId: socket.id, reason };
-      if (authType === 'user') {
-        logData.userId = socket.data.user.sub;
-        logData.role = socket.data.user.role;
-        logData.companyId = socket.data.user.company_id;
-      } else if (authType === 'guest') {
-        logData.sessionId = socket.data.guest.session_id;
-        logData.conversationId = socket.data.guest.conversation_id;
-      }
-      logger.info('Client disconnected', logData);
+      logger.info('socket_disconnected', { auth_type: authType, reason });
     });
   });
 };

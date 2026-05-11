@@ -14,6 +14,9 @@ router.get('/conversations/:id/messages', authenticateToken, controller.getMessa
 // POST /api/conversations/:id/read
 router.post('/conversations/:id/read', authenticateToken, controller.markRead.bind(controller));
 
+// POST /api/conversations/:id/messages
+router.post('/conversations/:id/messages', authenticateToken, controller.sendMessage.bind(controller));
+
 // PATCH /api/conversations/:id/status
 router.patch('/conversations/:id/status', authenticateToken, controller.updateStatus.bind(controller));
 

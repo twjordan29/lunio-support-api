@@ -6,6 +6,8 @@ class ConversationService {
   }
 
   async getConversations(userId, role, page = 1, limit = 25) {
+    // For users, get their conversations (authenticated ones)
+    // For staff/admin, get all conversations
     const conversations = await this.repository.getConversations(userId, role, page, limit);
     const total = await this.repository.getConversationCount(userId, role);
     return {
@@ -76,21 +78,20 @@ class ConversationService {
     return updated;
   }
 
-  async sendMessage(conversationId, senderType, senderId, body, userId, role) {
-    // For new conversation
-    let convId = conversationId;
-    if (!convId) {
-      if (role !== 'user') {
-        throw new Error('conversation_id required for non-users');
+  async sendMessage(conversationId, userId, role, body) {
+    // Check access
+    if (role === 'user') {
+      const conv = await this.repository.getConversationById(conversationId);
+      if (!conv || conv.user_id !== userId) {
+        throw new Error('Access denied');
       }
-      // Create new conversation (this would be called from socket, but for completeness)
-      convId = await this.repository.createConversation(userId, null, null); // Assume no subject for now
     }
 
-    const messageId = await this.repository.createMessage(convId, senderType, senderId, body);
-    await this.repository.updateConversationLastMessage(convId);
+    const senderType = role === 'user' ? 'user' : 'staff';
+    const messageId = await this.repository.createMessage(conversationId, senderType, userId, body);
+    await this.repository.updateConversationLastMessage(conversationId);
 
-    return { messageId, conversationId: convId };
+    return messageId;
   }
 }
 

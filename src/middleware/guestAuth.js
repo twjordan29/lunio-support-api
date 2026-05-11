@@ -1,4 +1,4 @@
-const { verifyGuestToken } = require('../utils/guestToken');
+const { verifyGuestToken } = require('../services/tokenService');
 
 function authenticateGuest(req, res, next) {
   const authHeader = req.headers['authorization'];

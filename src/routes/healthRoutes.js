@@ -3,7 +3,7 @@ const router = express.Router();
 const jwt = require('jsonwebtoken');
 const env = require('../config/env');
 const logger = require('../utils/logger');
-const pool = require('../config/database');
+const pool = require('../config/db');
 
 router.get('/health', (req, res) => {
   const response = {

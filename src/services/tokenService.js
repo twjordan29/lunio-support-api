@@ -1,13 +1,11 @@
 const jwt = require('jsonwebtoken');
 const env = require('../config/env');
 
-function generateGuestToken(sessionId, conversationId = null, name = null, email = null) {
+function generateGuestToken(sessionId, conversationId) {
   const payload = {
     type: 'guest',
     session_id: sessionId,
     conversation_id: conversationId,
-    name,
-    email,
     iat: Math.floor(Date.now() / 1000),
     exp: Math.floor(Date.now() / 1000) + 3600 * 24 * 7 // 7 days
   };
@@ -27,7 +25,17 @@ function verifyGuestToken(token) {
   }
 }
 
+function verifyAuthToken(token) {
+  try {
+    const decoded = jwt.verify(token, env.chatTokenSecret);
+    return decoded;
+  } catch (error) {
+    throw new Error(`Auth token verification failed: ${error.message}`);
+  }
+}
+
 module.exports = {
   generateGuestToken,
-  verifyGuestToken
+  verifyGuestToken,
+  verifyAuthToken
 };

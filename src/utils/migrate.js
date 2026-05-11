@@ -1,6 +1,6 @@
 const fs = require('fs');
 const path = require('path');
-const pool = require('../config/database');
+const pool = require('../config/db');
 const logger = require('./logger');
 
 const MIGRATIONS_DIR = path.join(__dirname, '..', 'migrations');

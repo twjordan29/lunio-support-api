@@ -1,173 +1,98 @@
 const crypto = require('crypto');
 const ConversationService = require('../services/conversationService');
-const { generateGuestToken } = require('../utils/guestToken');
+const { generateGuestToken } = require('../services/tokenService');
+const logger = require('../utils/logger');
+const pool = require('../config/db');
 
 class GuestController {
   constructor() {
     this.service = new ConversationService();
   }
 
-  async createToken(req, res) {
+  async startConversation(req, res) {
     try {
-      const { name, email } = req.body;
+      const { name, email, message } = req.body;
 
       // Validate
-      if (!name || !email) {
-        return res.status(400).json({ ok: false, error: { message: 'Name and email required', code: 'MISSING_FIELDS' } });
+      if (!name || !email || !message) {
+        return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Name, email, and message are required' } });
       }
 
       if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-        return res.status(400).json({ ok: false, error: { message: 'Invalid email format', code: 'INVALID_EMAIL' } });
+        return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Invalid email format' } });
       }
 
-      if (name.length > 255 || email.length > 255) {
-        return res.status(400).json({ ok: false, error: { message: 'Name or email too long', code: 'FIELD_TOO_LONG' } });
+      if (name.length > 255 || email.length > 255 || message.length > 5000) {
+        return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Fields exceed maximum length' } });
       }
 
-      // Generate session id
-      const sessionId = crypto.randomUUID();
+      logger.info('guest_conversation_start_started');
 
-      const token = generateGuestToken(sessionId, null, name, email);
+      // Generate session UUID
+      const sessionUuid = crypto.randomUUID();
+      const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 days
 
-      res.json({
-        ok: true,
-        data: {
-          token,
-          session_id: sessionId,
-          expires_in: 3600 * 24 * 7
-        }
-      });
-    } catch (error) {
-      res.status(500).json({ ok: false, error: { message: 'Internal server error', code: 'INTERNAL_ERROR' } });
-    }
-  }
+      // Create or update guest session
+      await pool.execute(`
+        INSERT INTO support_guest_sessions (session_uuid, name, email, expires_at)
+        VALUES (?, ?, ?, ?)
+        ON DUPLICATE KEY UPDATE name = VALUES(name), email = VALUES(email), updated_at = CURRENT_TIMESTAMP
+      `, [sessionUuid, name, email, expiresAt]);
 
-  async createConversation(req, res) {
-    try {
-      const { first_message, source_url } = req.body;
-      const { session_id, name, email } = req.guest;
+      const [sessionResult] = await pool.execute('SELECT id FROM support_guest_sessions WHERE session_uuid = ?', [sessionUuid]);
+      const sessionId = sessionResult[0].id;
 
-      logger.info('guest_conversation_create_started', { session_id });
+      logger.info('guest_session_created', { session_uuid: sessionUuid });
 
-      // Create conversation with guest data
-      const repository = require('../repositories/conversationRepository');
-      const repo = new repository();
+      // Create support conversation
+      const [convResult] = await pool.execute(`
+        INSERT INTO support_conversations (source, status, guest_session_id, created_at, updated_at)
+        VALUES ('guest', 'open', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+      `, [sessionId]);
+      const conversationId = convResult.insertId;
 
-      logger.info('guest_token_validated', { session_id });
+      logger.info('guest_conversation_created', { conversation_id: conversationId });
 
-      logger.info('guest_conversation_insert_started', { session_id });
-      const conversationId = await repo.createConversation(null, null, null); // No user_id, company_id
+      // Create first support message
+      const [msgResult] = await pool.execute(`
+        INSERT INTO support_messages (conversation_id, sender_type, body, created_at)
+        VALUES (?, 'guest', ?, CURRENT_TIMESTAMP)
+      `, [conversationId, message.trim()]);
+      const messageId = msgResult.insertId;
 
-      // Update with guest data
-      await repo.pool.execute(`
-        UPDATE support_conversations
-        SET conversation_type = 'guest',
-            guest_name = ?,
-            guest_email = ?,
-            guest_session_id = ?,
-            source_url = ?,
-            status = 'open'
-        WHERE id = ?
-      `, [name, email, session_id, source_url || null, conversationId]);
-      logger.info('guest_conversation_insert_success', { session_id, conversation_id: conversationId });
+      logger.info('guest_first_message_created', { message_id: messageId });
 
-      // If first message, send it
-      if (first_message) {
-        logger.info('guest_first_message_insert_started', { session_id, conversation_id: conversationId });
-        const messageId = await repo.createMessage(conversationId, 'user', null, first_message); // No sender_id for guest
-        await repo.updateConversationLastMessage(conversationId);
-        logger.info('guest_first_message_insert_success', { session_id, conversation_id: conversationId, message_id: messageId });
-      }
+      // Create participant row for guest
+      await pool.execute(`
+        INSERT INTO support_conversation_participants (conversation_id, participant_type, created_at)
+        VALUES (?, 'guest', CURRENT_TIMESTAMP)
+      `, [conversationId]);
 
-      // Generate token with conversation_id
-      logger.info('guest_token_refresh_started', { session_id, conversation_id: conversationId });
-      const token = generateGuestToken(session_id, conversationId, name, email);
-      logger.info('guest_token_refresh_success', { session_id, conversation_id: conversationId });
+      // Issue guest JWT
+      const guestToken = generateGuestToken(sessionId, conversationId);
+
+      logger.info('guest_token_issued', { conversation_id: conversationId });
 
       res.json({
         ok: true,
         data: {
           conversation_id: conversationId,
-          token
+          guest_token: guestToken,
+          session_id: sessionUuid,
+          message_id: messageId
         }
       });
     } catch (error) {
-      const errorDetails = {
+      logger.error('guest_conversation_start_failed', {
+        error: error.message,
         name: error.name,
-        message: error.message,
-        code: error.code,
-        errno: error.errno,
-        sqlState: error.sqlState,
-        sqlMessage: error.sqlMessage,
-        stage: 'unknown', // Will be updated based on last logged stage
-        session_id: req.guest?.session_id,
-        conversation_id: undefined // Will be set if available
-      };
-      logger.error('guest_conversation_create_failed', errorDetails);
-      res.status(500).json({ ok: false, error: { message: 'Internal server error', code: 'INTERNAL_ERROR' } });
-    }
-  }
-
-  async getMessages(req, res) {
-    try {
-      const conversationId = parseInt(req.params.id);
-      const { session_id } = req.guest;
-
-      // Check access: guest_session_id matches
-      const repository = require('../repositories/conversationRepository');
-      const repo = new repository();
-      const conv = await repo.getConversationById(conversationId);
-      if (!conv || conv.conversation_type !== 'guest' || conv.guest_session_id !== session_id) {
-        return res.status(403).json({ ok: false, error: { message: 'Access denied', code: 'ACCESS_DENIED' } });
-      }
-
-      const page = parseInt(req.query.page) || 1;
-      const limit = Math.min(parseInt(req.query.limit) || 25, 100);
-
-      const result = await this.service.getMessages(conversationId, null, 'user', page, limit); // Role 'user' to exclude internal
-
-      res.json({ ok: true, data: result });
-    } catch (error) {
-      res.status(500).json({ ok: false, error: { message: 'Internal server error', code: 'INTERNAL_ERROR' } });
-    }
-  }
-
-  async sendMessage(req, res) {
-    try {
-      const conversationId = parseInt(req.params.id);
-      const { body } = req.body;
-      const { session_id } = req.guest;
-
-      // Check access
-      const repository = require('../repositories/conversationRepository');
-      const repo = new repository();
-      const conv = await repo.getConversationById(conversationId);
-      if (!conv || conv.conversation_type !== 'guest' || conv.guest_session_id !== session_id) {
-        return res.status(403).json({ ok: false, error: { message: 'Access denied', code: 'ACCESS_DENIED' } });
-      }
-
-      if (!body || body.trim().length === 0) {
-        return res.status(400).json({ ok: false, error: { message: 'Message body required', code: 'MISSING_BODY' } });
-      }
-
-      if (body.length > 5000) {
-        return res.status(400).json({ ok: false, error: { message: 'Message too long', code: 'MESSAGE_TOO_LONG' } });
-      }
-
-      const messageId = await repo.createMessage(conversationId, 'user', null, body.trim());
-      await repo.updateConversationLastMessage(conversationId);
-
-      res.json({
-        ok: true,
-        data: {
-          message_id: messageId,
-          conversation_id: conversationId
-        }
+        code: error.code
       });
-    } catch (error) {
-      res.status(500).json({ ok: false, error: { message: 'Internal server error', code: 'INTERNAL_ERROR' } });
+      res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Internal server error' } });
     }
   }
+
+
 }
 
 module.exports = GuestController;

@@ -1,4 +1,4 @@
-const { verifyChatToken } = require('../utils/chatToken');
+const { verifyAuthToken } = require('../services/tokenService');
 
 function authenticateToken(req, res, next) {
   const authHeader = req.headers['authorization'];
@@ -9,7 +9,7 @@ function authenticateToken(req, res, next) {
   }
 
   try {
-    const user = verifyChatToken(token);
+    const user = verifyAuthToken(token);
     req.user = user;
     next();
   } catch (error) {

@@ -1,4 +1,4 @@
-const pool = require('../config/database');
+const pool = require('../config/db');
 
 class ConversationRepository {
   async getConversations(userId, role, page = 1, limit = 25) {
