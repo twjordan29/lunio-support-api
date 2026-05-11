@@ -1,4 +1,5 @@
 const ConversationService = require('../services/conversationService');
+const logger = require('../utils/logger');
 
 class ConversationController {
   constructor() {
@@ -7,13 +8,27 @@ class ConversationController {
 
   async getConversations(req, res) {
     try {
-      const { sub: userId, role } = req.user;
+      const { sub: userId, role, company_id: companyId } = req.user;
       const page = parseInt(req.query.page) || 1;
       const limit = Math.min(parseInt(req.query.limit) || 25, 100);
+
+      logger.info('auth_user_loaded', { user_id: userId, role, company_id: companyId, route: req.path });
 
       const result = await this.service.getConversations(userId, role, page, limit);
       res.json({ ok: true, data: result });
     } catch (error) {
+      logger.error('conversations_endpoint_failed', {
+        user_id: req.user?.sub,
+        role: req.user?.role,
+        company_id: req.user?.company_id,
+        route: req.path,
+        err_name: error.name,
+        err_message: error.message,
+        err_code: error.code,
+        err_errno: error.errno,
+        err_sqlState: error.sqlState,
+        err_sqlMessage: error.sqlMessage
+      });
       res.status(500).json({ ok: false, error: { message: 'Internal server error', code: 'INTERNAL_ERROR' } });
     }
   }

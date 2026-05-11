@@ -34,7 +34,7 @@ class ConversationRepository {
       LIMIT ? OFFSET ?
     `;
 
-    const participantType = role === 'user' ? 'user' : role;
+    const participantType = role === 'user' ? 'user' : 'staff';
     params.splice(1, 0, participantType, userId); // Insert before limit
 
     const [rows] = await pool.execute(query, params);
@@ -101,7 +101,8 @@ class ConversationRepository {
     return this.getConversationById(id);
   }
 
-  async markConversationRead(conversationId, participantType, participantId) {
+  async markConversationRead(conversationId, role, participantId) {
+    const participantType = role === 'user' ? 'user' : 'staff';
     // Get latest message id
     const [msgRows] = await pool.execute(
       'SELECT id FROM support_messages WHERE conversation_id = ? ORDER BY id DESC LIMIT 1',
@@ -124,7 +125,7 @@ class ConversationRepository {
   }
 
   async getUnreadCount(userId, role) {
-    const participantType = role === 'user' ? 'user' : role;
+    const participantType = role === 'user' ? 'user' : 'staff';
 
     const query = `
       SELECT COUNT(*) as unread_count FROM support_messages sm

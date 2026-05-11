@@ -1,4 +1,5 @@
 const ConversationRepository = require('../repositories/conversationRepository');
+const logger = require('../utils/logger');
 
 class ConversationService {
   constructor() {
@@ -6,19 +7,40 @@ class ConversationService {
   }
 
   async getConversations(userId, role, page = 1, limit = 25) {
-    // For users, get their conversations (authenticated ones)
-    // For staff/admin, get all conversations
-    const conversations = await this.repository.getConversations(userId, role, page, limit);
-    const total = await this.repository.getConversationCount(userId, role);
-    return {
-      conversations,
-      pagination: {
+    try {
+      logger.info('conversations_list_started', { user_id: userId, role, page, limit });
+
+      // For users, get their conversations (authenticated ones)
+      // For staff/admin, get all conversations
+      logger.info('conversations_query_started', { user_id: userId, role });
+      const conversations = await this.repository.getConversations(userId, role, page, limit);
+      const total = await this.repository.getConversationCount(userId, role);
+      logger.info('conversations_query_success', { user_id: userId, role, conversation_count: conversations.length, total });
+
+      return {
+        conversations,
+        pagination: {
+          page,
+          limit,
+          total,
+          pages: Math.ceil(total / limit)
+        }
+      };
+    } catch (error) {
+      logger.error('conversations_list_failed', {
+        user_id: userId,
+        role,
         page,
         limit,
-        total,
-        pages: Math.ceil(total / limit)
-      }
-    };
+        err_name: error.name,
+        err_message: error.message,
+        err_code: error.code,
+        err_errno: error.errno,
+        err_sqlState: error.sqlState,
+        err_sqlMessage: error.sqlMessage
+      });
+      throw error;
+    }
   }
 
   async getMessages(conversationId, userId, role, page = 1, limit = 25) {
@@ -56,8 +78,7 @@ class ConversationService {
       }
     }
 
-    const participantType = role === 'user' ? 'user' : role;
-    const result = await this.repository.markConversationRead(conversationId, participantType, userId);
+    const result = await this.repository.markConversationRead(conversationId, role, userId);
     const unreadCount = await this.repository.getUnreadCount(userId, role);
 
     return {
