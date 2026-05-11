@@ -68,6 +68,27 @@ module.exports = (io) => {
       }
     });
 
+    // support:typing
+    socket.on('support:typing', (data) => {
+      try {
+        const { conversation_id, is_typing } = data;
+        if (!conversation_id) {
+          return socket.emit('support:error', { message: 'conversation_id required' });
+        }
+
+        // Broadcast to conversation room excluding sender
+        io.to(`conversation:${conversation_id}`).except(socket.id).emit('support:typing', {
+          conversation_id,
+          user_id: user.sub,
+          role: user.role,
+          is_typing: !!is_typing
+        });
+      } catch (error) {
+        logger.error('Error handling typing', { error: error.message, socketId: socket.id });
+        socket.emit('support:error', { message: 'Failed to update typing status' });
+      }
+    });
+
     // support:message:send
     socket.on('support:message:send', async (data) => {
       try {

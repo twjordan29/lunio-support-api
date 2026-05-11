@@ -17,6 +17,9 @@ const io = socketIo(server, {
 // Setup Socket.IO handlers
 setupSockets(io);
 
+// Make io available to routes
+app.set('io', io);
+
 // Start server
 server.listen(env.port, () => {
   logger.info(`Lunio Support API server running`, {
