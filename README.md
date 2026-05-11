@@ -159,20 +159,89 @@ socket.emit('support:message:send', {
 
 ## Local Testing
 
-For development, you can generate a test token using the dev endpoint:
+For development, you can generate test tokens for different roles using the dev endpoint:
 
 ```bash
-curl http://localhost:3001/dev/test-token
+# Generate user token
+curl "http://localhost:3001/dev/test-token?role=user"
+
+# Generate admin token
+curl "http://localhost:3001/dev/test-token?role=admin"
+
+# Generate support token
+curl "http://localhost:3001/dev/test-token?role=support"
 ```
 
-This returns a short-lived JWT token with test user data. Use this token in your Socket.IO client for testing:
+Each returns a short-lived JWT token with realistic test user data:
+
+```json
+{
+  "ok": true,
+  "role": "user",
+  "expires_in": 3600,
+  "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+}
+```
+
+### Testing Conversation Flows
+
+**1. User creates a conversation:**
 
 ```javascript
-const response = await fetch('http://localhost:3001/dev/test-token');
-const { token } = await response.json();
+// Get user token
+const userResponse = await fetch('http://localhost:3001/dev/test-token?role=user');
+const { token: userToken } = await userResponse.json();
 
-const socket = io('http://localhost:3001', {
-  auth: { token }
+// Connect as user
+const userSocket = io('http://localhost:3001', { auth: { token: userToken } });
+
+// Send first message (creates conversation)
+userSocket.emit('support:message:send', {
+  body: "Hello, I need help with my invoice",
+  subject: "Invoice Support"
+});
+
+// Listen for confirmation
+userSocket.on('support:message:sent', (data) => {
+  console.log('Message sent, conversation created');
+});
+```
+
+**2. Admin/support joins and replies:**
+
+```javascript
+// Get admin token
+const adminResponse = await fetch('http://localhost:3001/dev/test-token?role=admin');
+const { token: adminToken } = await adminResponse.json();
+
+// Connect as admin
+const adminSocket = io('http://localhost:3001', { auth: { token: adminToken } });
+
+// Join conversation (get conversation_id from user's message or API)
+adminSocket.emit('support:conversation:join', { conversation_id: 1 });
+
+// Send reply
+adminSocket.emit('support:message:send', {
+  conversation_id: 1,
+  body: "I'd be happy to help! Can you provide your invoice number?"
+});
+
+// Listen for broadcasts
+adminSocket.on('support:message:new', (message) => {
+  console.log('New message:', message);
+});
+```
+
+**3. Fetch conversation history via REST:**
+
+```javascript
+// Using user token
+const conversations = await fetch('http://localhost:3001/api/conversations', {
+  headers: { 'Authorization': `Bearer ${userToken}` }
+});
+
+const messages = await fetch('http://localhost:3001/api/conversations/1/messages', {
+  headers: { 'Authorization': `Bearer ${userToken}` }
 });
 ```
 
