@@ -27,7 +27,7 @@ class GuestController {
       // Generate session id
       const sessionId = crypto.randomUUID();
 
-      const token = generateGuestToken(sessionId);
+      const token = generateGuestToken(sessionId, null, name, email);
 
       res.json({
         ok: true,
@@ -44,13 +44,18 @@ class GuestController {
 
   async createConversation(req, res) {
     try {
-      const { name, email, first_message, source_url } = req.body;
-      const { session_id } = req.guest;
+      const { first_message, source_url } = req.body;
+      const { session_id, name, email } = req.guest;
+
+      logger.info('guest_conversation_create_started', { session_id });
 
       // Create conversation with guest data
       const repository = require('../repositories/conversationRepository');
       const repo = new repository();
 
+      logger.info('guest_token_validated', { session_id });
+
+      logger.info('guest_conversation_insert_started', { session_id });
       const conversationId = await repo.createConversation(null, null, null); // No user_id, company_id
 
       // Update with guest data
@@ -64,28 +69,30 @@ class GuestController {
             status = 'open'
         WHERE id = ?
       `, [name, email, session_id, source_url || null, conversationId]);
+      logger.info('guest_conversation_insert_success', { session_id, conversation_id: conversationId });
 
       // If first message, send it
       if (first_message) {
+        logger.info('guest_first_message_insert_started', { session_id, conversation_id: conversationId });
         const messageId = await repo.createMessage(conversationId, 'user', null, first_message); // No sender_id for guest
         await repo.updateConversationLastMessage(conversationId);
+        logger.info('guest_first_message_insert_success', { session_id, conversation_id: conversationId, message_id: messageId });
       }
 
       // Generate token with conversation_id
-      const token = generateGuestToken(session_id, conversationId);
+      logger.info('guest_token_refresh_started', { session_id, conversation_id: conversationId });
+      const token = generateGuestToken(session_id, conversationId, name, email);
+      logger.info('guest_token_refresh_success', { session_id, conversation_id: conversationId });
 
       res.json({
         ok: true,
         data: {
-          conversation: {
-            id: conversationId,
-            type: 'guest',
-            status: 'open'
-          },
+          conversation_id: conversationId,
           token
         }
       });
     } catch (error) {
+      logger.error('guest_conversation_create_failed', { session_id: req.guest?.session_id, error: error.message });
       res.status(500).json({ ok: false, error: { message: 'Internal server error', code: 'INTERNAL_ERROR' } });
     }
   }

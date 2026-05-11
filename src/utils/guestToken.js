@@ -1,11 +1,13 @@
 const jwt = require('jsonwebtoken');
 const env = require('../config/env');
 
-function generateGuestToken(sessionId, conversationId = null) {
+function generateGuestToken(sessionId, conversationId = null, name = null, email = null) {
   const payload = {
     type: 'guest',
     session_id: sessionId,
     conversation_id: conversationId,
+    name,
+    email,
     iat: Math.floor(Date.now() / 1000),
     exp: Math.floor(Date.now() / 1000) + 3600 * 24 * 7 // 7 days
   };
