@@ -18,19 +18,47 @@ async function up(pool) {
   await pool.execute(`
     ALTER TABLE support_conversations
     ADD COLUMN IF NOT EXISTS source ENUM('guest','authenticated') NOT NULL DEFAULT 'authenticated' AFTER status,
-    ADD COLUMN IF NOT EXISTS guest_session_id BIGINT UNSIGNED NULL AFTER source,
+    MODIFY COLUMN guest_session_id BIGINT UNSIGNED NULL,
     MODIFY COLUMN user_id BIGINT UNSIGNED NULL,
-    ADD INDEX IF NOT EXISTS idx_guest_session_id (guest_session_id),
-    ADD CONSTRAINT fk_guest_session_id FOREIGN KEY (guest_session_id) REFERENCES support_guest_sessions(id) ON DELETE SET NULL
+    ADD INDEX IF NOT EXISTS idx_guest_session_id (guest_session_id)
   `);
 
-  // Alter support_messages sender_type
+  // First, expand the ENUM to include 'staff'
+  await pool.execute(`
+    ALTER TABLE support_messages
+    MODIFY COLUMN sender_type ENUM('user','admin','support','system','staff') NOT NULL
+  `);
+
+  await pool.execute(`
+    ALTER TABLE support_conversation_participants
+    MODIFY COLUMN participant_type ENUM('user','admin','support','staff') NOT NULL
+  `);
+
+  // Now update existing values
+  await pool.execute(`
+    UPDATE support_messages
+    SET sender_type = CASE
+      WHEN sender_type = 'admin' THEN 'staff'
+      WHEN sender_type = 'support' THEN 'staff'
+      ELSE sender_type
+    END
+  `);
+
+  await pool.execute(`
+    UPDATE support_conversation_participants
+    SET participant_type = CASE
+      WHEN participant_type = 'admin' THEN 'staff'
+      WHEN participant_type = 'support' THEN 'staff'
+      ELSE participant_type
+    END
+  `);
+
+  // Now set to final ENUM
   await pool.execute(`
     ALTER TABLE support_messages
     MODIFY COLUMN sender_type ENUM('guest','user','staff','system') NOT NULL
   `);
 
-  // Alter support_conversation_participants
   await pool.execute(`
     ALTER TABLE support_conversation_participants
     MODIFY COLUMN participant_type ENUM('guest','user','staff') NOT NULL,
