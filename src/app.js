@@ -28,7 +28,16 @@ app.use('/api/guest', guestRoutes);
 
 // Error handling middleware
 app.use((err, req, res, next) => {
-  logger.error('Unhandled error', { error: err.message, stack: err.stack });
+  const errorDetails = {
+    name: err.name,
+    message: err.message,
+    code: err.code,
+    errno: err.errno,
+    sqlState: err.sqlState,
+    sqlMessage: err.sqlMessage,
+    stack: env.nodeEnv !== 'production' ? err.stack : err.stack?.split('\n')[0] // First line only in production
+  };
+  logger.error('Unhandled error', errorDetails);
   res.status(500).json({ error: 'Internal server error' });
 });
 

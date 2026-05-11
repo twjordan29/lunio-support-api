@@ -92,7 +92,18 @@ class GuestController {
         }
       });
     } catch (error) {
-      logger.error('guest_conversation_create_failed', { session_id: req.guest?.session_id, error: error.message });
+      const errorDetails = {
+        name: error.name,
+        message: error.message,
+        code: error.code,
+        errno: error.errno,
+        sqlState: error.sqlState,
+        sqlMessage: error.sqlMessage,
+        stage: 'unknown', // Will be updated based on last logged stage
+        session_id: req.guest?.session_id,
+        conversation_id: undefined // Will be set if available
+      };
+      logger.error('guest_conversation_create_failed', errorDetails);
       res.status(500).json({ ok: false, error: { message: 'Internal server error', code: 'INTERNAL_ERROR' } });
     }
   }
