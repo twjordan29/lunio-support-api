@@ -58,11 +58,31 @@ All environment variables are required. The service will not start without them.
 
 4. The server will start on the port specified in your `.env` file (default: 3001)
 
+## Database Migrations
+
+This service uses its own migration system to manage database schema changes.
+
+### Running Migrations
+
+```bash
+# Run all pending migrations
+npm run migrate
+
+# Check migration status
+npm run migrate:status
+```
+
+Migrations are stored in `src/migrations/` and applied migrations are tracked in the `support_api_migrations` table.
+
 ## API Endpoints
+
+All API endpoints require authentication via `Authorization: Bearer <token>` header using the same chat tokens as Socket.IO.
 
 - `GET /health` - General service health check
 - `GET /health/db` - Database connectivity health check
 - `GET /dev/test-token` - Development-only endpoint to generate test chat tokens (not available in production)
+- `GET /api/conversations` - Get user's conversations (users see own, staff see all)
+- `GET /api/conversations/:id/messages` - Get messages for a conversation (access controlled)
 
 ## Authentication
 
@@ -96,12 +116,44 @@ const socket = io('http://localhost:3001', {
 
 ## WebSocket
 
-The service accepts authenticated Socket.IO connections. Upon successful connection, it emits a `support:connected` event:
+The service accepts authenticated Socket.IO connections. Upon successful connection, clients are automatically joined to relevant rooms and receive a `support:connected` event:
 
 ```javascript
 socket.on('support:connected', (data) => {
   console.log('Connected:', data);
   // { ok: true, user_id: 123, role: "admin", company_id: 456 }
+});
+```
+
+### Rooms
+
+Clients are automatically joined to:
+- `user:{user_id}` - Personal room
+- `company:{company_id}` - Company room (if company_id exists)
+- `support:staff` - Staff room (for admin/support roles)
+
+### Events
+
+#### Outgoing Events
+- `support:connected` - Connection confirmation with user data
+- `support:conversation:joined` - Confirmation of conversation join
+- `support:message:new` - New message broadcast
+- `support:message:sent` - Confirmation of sent message
+- `support:error` - Error notifications
+
+#### Incoming Events
+
+**Join Conversation:**
+```javascript
+socket.emit('support:conversation:join', { conversation_id: 123 });
+```
+
+**Send Message:**
+```javascript
+socket.emit('support:message:send', {
+  conversation_id: 123,  // optional for users creating new conversations
+  body: "Hello, I need help",
+  subject: "Support Request"  // optional
 });
 ```
 
@@ -176,13 +228,18 @@ src/
 ├── config/
 │   ├── env.js       # Environment variable validation
 │   └── database.js  # MariaDB connection pool
+├── migrations/
+│   └── 001_create_support_tables.js  # Database schema migrations
 ├── routes/
-│   └── health.routes.js  # Health check endpoints and dev routes
+│   ├── health.routes.js  # Health check endpoints and dev routes
+│   └── api.routes.js     # REST API endpoints with authentication
 ├── sockets/
 │   └── index.js     # Socket.IO connection handlers and auth middleware
 └── utils/
     ├── logger.js    # Pino structured logging
-    └── chatToken.js # JWT token verification utilities
+    ├── chatToken.js # JWT token verification utilities
+    ├── auth.js      # HTTP authentication middleware
+    └── migrate.js   # Database migration runner
 ```
 
 ## Security

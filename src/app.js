@@ -4,6 +4,7 @@ const cors = require('cors');
 const env = require('./config/env');
 const logger = require('./utils/logger');
 const healthRoutes = require('./routes/health.routes');
+const apiRoutes = require('./routes/api.routes');
 
 const app = express();
 
@@ -21,6 +22,7 @@ app.use(express.json());
 
 // Routes
 app.use('/', healthRoutes);
+app.use('/api', apiRoutes);
 
 // Error handling middleware
 app.use((err, req, res, next) => {

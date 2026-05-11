@@ -6,6 +6,8 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "node src/server.js",
+    "migrate": "node src/utils/migrate.js migrate",
+    "migrate:status": "node src/utils/migrate.js status",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
