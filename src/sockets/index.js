@@ -128,10 +128,25 @@ module.exports = (io) => {
           created_at: new Date().toISOString()
         };
 
-        // Broadcast
-        io.to(`conversation:${convId}`).emit('support:message:new', message);
-        io.to('support:staff').emit('support:message:new', message);
-        io.to(`user:${user.sub}`).emit('support:message:new', message);
+        // Broadcast to conversation room, excluding sender
+        io.to(`conversation:${convId}`).except(socket.id).emit('support:message:new', message);
+        logger.debug('Broadcasted message to conversation room', {
+          room: `conversation:${convId}`,
+          socketId: socket.id,
+          messageId: message.id,
+          excludedSender: true
+        });
+
+        // If sender is staff, also broadcast to staff room excluding sender
+        if (user.role !== 'user') {
+          io.to('support:staff').except(socket.id).emit('support:message:new', message);
+          logger.debug('Broadcasted message to staff room', {
+            room: 'support:staff',
+            socketId: socket.id,
+            messageId: message.id,
+            excludedSender: true
+          });
+        }
 
         socket.emit('support:message:sent', { message_id: message.id });
 
