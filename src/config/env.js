@@ -33,5 +33,5 @@ module.exports = {
   },
   chatTokenSecret: process.env.CHAT_TOKEN_SECRET,
   lunioAppUrl: process.env.LUNIO_APP_URL,
-  corsOrigin: process.env.CORS_ORIGIN
+  corsOrigin: process.env.CORS_ORIGIN.split(',').map(o => o.trim())
 };

@@ -86,6 +86,10 @@ All API endpoints require authentication via `Authorization: Bearer <token>` hea
 - `POST /api/conversations/:id/read` - Mark conversation as read for authenticated user
 - `PATCH /api/conversations/:id/status` - Update conversation status (admin/support only)
 - `PATCH /api/conversations/:id/assignment` - Update assigned admin (admin/support only)
+- `POST /api/guest/token` - Generate guest chat token
+- `POST /api/guest/conversations` - Create guest conversation
+- `GET /api/guest/conversations/:id/messages` - Get guest conversation messages
+- `POST /api/guest/conversations/:id/messages` - Send guest message
 
 ## Authentication
 
@@ -120,6 +124,11 @@ const socket = io('http://localhost:3001', {
 ## WebSocket
 
 The service accepts authenticated Socket.IO connections. Upon successful connection, clients are automatically joined to relevant rooms and receive a `support:connected` event:
+
+### Authentication
+
+- **Authenticated users**: `auth: { token: "jwt-token" }`
+- **Guests**: `auth: { guest_token: "guest-jwt-token" }`
 
 ```javascript
 socket.on('support:connected', (data) => {
@@ -336,17 +345,21 @@ src/
 │   ├── env.js       # Environment variable validation
 │   └── database.js  # MariaDB connection pool
 ├── controllers/
-│   └── conversationController.js  # API route handlers
+│   ├── conversationController.js  # API route handlers
+│   └── guestController.js         # Guest API route handlers
 ├── middleware/
-│   └── auth.js      # HTTP authentication middleware
+│   ├── auth.js      # HTTP authentication middleware
+│   └── guestAuth.js # Guest HTTP authentication middleware
 ├── migrations/
 │   ├── 001_create_support_tables.js
-│   └── 002_add_conversation_participants.js  # Database schema migrations
+│   ├── 002_add_conversation_participants.js
+│   └── 003_add_guest_support.js  # Database schema migrations
 ├── repositories/
 │   └── conversationRepository.js  # Database access layer
 ├── routes/
 │   ├── health.routes.js  # Health check endpoints and dev routes
-│   └── api.routes.js     # REST API endpoints with authentication
+│   ├── api.routes.js     # REST API endpoints with authentication
+│   └── guest.routes.js   # Guest REST API endpoints
 ├── services/
 │   └── conversationService.js  # Business logic layer
 ├── sockets/
@@ -354,6 +367,7 @@ src/
 └── utils/
     ├── logger.js    # Pino structured logging
     ├── chatToken.js # JWT token verification utilities
+    ├── guestToken.js # Guest JWT token utilities
     └── migrate.js   # Database migration runner
 ```
 
