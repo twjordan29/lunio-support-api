@@ -11,10 +11,10 @@ class GuestController {
 
   async startConversation(req, res) {
     try {
-      const { name, email, message } = req.body;
+      const { name, email, message: body } = req.body;
 
       // Validate
-      if (!name || !email || !message) {
+      if (!name || !email || !body) {
         return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Name, email, and message are required' } });
       }
 
@@ -22,7 +22,7 @@ class GuestController {
         return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Invalid email format' } });
       }
 
-      if (name.length > 255 || email.length > 255 || message.length > 5000) {
+      if (name.length > 255 || email.length > 255 || body.length > 5000) {
         return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Fields exceed maximum length' } });
       }
 
@@ -42,7 +42,7 @@ class GuestController {
       const [sessionResult] = await pool.execute('SELECT id FROM support_guest_sessions WHERE session_uuid = ?', [sessionUuid]);
       const sessionId = sessionResult[0].id;
 
-      logger.info('guest_session_created', { session_uuid: sessionUuid });
+      logger.info('guest_session_created');
 
       // Create support conversation
       const [convResult] = await pool.execute(`
@@ -57,7 +57,7 @@ class GuestController {
       const [msgResult] = await pool.execute(`
         INSERT INTO support_messages (conversation_id, sender_type, body, created_at)
         VALUES (?, 'guest', ?, CURRENT_TIMESTAMP)
-      `, [conversationId, message.trim()]);
+      `, [conversationId, body.trim()]);
       const messageId = msgResult.insertId;
 
       logger.info('guest_first_message_created', { message_id: messageId });
@@ -72,6 +72,37 @@ class GuestController {
       const guestToken = generateGuestToken(sessionId, conversationId);
 
       logger.info('guest_token_issued', { conversation_id: conversationId });
+
+      const io = req.app.get('io');
+      if (io) {
+        const messagePayload = {
+          id: messageId,
+          conversation_id: conversationId,
+          sender_type: 'guest',
+          sender_id: null,
+          body: body.trim(),
+          created_at: new Date().toISOString(),
+          read_at: null,
+        };
+        const conversation = {
+          id: conversationId,
+          source: 'guest',
+          status: 'open',
+          assigned_admin_id: null,
+          assigned_admin_name: null,
+          customer_name: name || 'Guest',
+          customer_email: email || null,
+          latest_message: messagePayload.body,
+          latest_message_sender_type: 'guest',
+          latest_message_at: messagePayload.created_at,
+          unread_count: 1,
+          message_count: 1,
+          created_at: messagePayload.created_at,
+          updated_at: messagePayload.created_at,
+        };
+        io.to('staff').emit('support:message:new', { conversation_id: conversationId, message: messagePayload });
+        io.to('staff').emit('support:conversation:updated', { conversation_id: conversationId, conversation });
+      }
 
       res.json({
         ok: true,

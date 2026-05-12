@@ -1,9 +1,19 @@
 const logger = require('../utils/logger');
 const { verifyAuthToken, verifyGuestToken } = require('../services/tokenService');
-const pool = require('../config/db');
+const ConversationRepository = require('../repositories/conversationRepository');
+
+const STAFF_ROLES = new Set(['admin', 'support', 'staff']);
 
 module.exports = (io) => {
-  // Authentication middleware
+  const repository = new ConversationRepository();
+
+  const emitConversationUpdated = async (conversationId, userId, role) => {
+    const conversation = await repository.getConversationSummary(conversationId, userId, role);
+    const payload = { conversation_id: conversationId, conversation };
+    io.to('staff').emit('support:conversation:updated', payload);
+    return payload;
+  };
+
   io.use((socket, next) => {
     const token = socket.handshake.auth?.token;
     const guestToken = socket.handshake.auth?.guest_token;
@@ -12,152 +22,146 @@ module.exports = (io) => {
       try {
         const user = verifyAuthToken(token);
         socket.data.user = user;
-        socket.data.authType = user.role === 'user' ? 'user' : 'staff';
-        next();
+        socket.data.authType = STAFF_ROLES.has(String(user.role || '').toLowerCase()) ? 'staff' : 'user';
+        return next();
       } catch (error) {
         logger.info('socket_auth_failed', { error: 'invalid auth token' });
         return next(new Error('Invalid authentication token'));
       }
-    } else if (guestToken) {
+    }
+
+    if (guestToken) {
       try {
         const guest = verifyGuestToken(guestToken);
         socket.data.guest = guest;
         socket.data.authType = 'guest';
-        next();
+        return next();
       } catch (error) {
         logger.info('socket_auth_failed', { error: 'invalid guest token' });
         return next(new Error('Invalid guest token'));
       }
-    } else {
-      logger.info('socket_auth_failed', { error: 'no token provided' });
-      return next(new Error('Authentication token required'));
     }
+
+    logger.info('socket_auth_failed', { error: 'no token provided' });
+    return next(new Error('Authentication token required'));
   });
 
   io.on('connection', (socket) => {
-    logger.info('socket_connected', { auth_type: socket.data.authType });
-
     const authType = socket.data.authType;
     const { user, guest } = socket.data;
+    logger.info('socket_connected', { auth_type: authType });
 
     if (authType === 'user' || authType === 'staff') {
-      socket.emit('support:connected', {
-        ok: true,
-        auth_type: authType,
-        conversation_id: null // No specific conversation on connect
-      });
-
-      // Join user room
       socket.join(`user:${user.sub}`);
-      // Staff join staff room
-      if (authType === 'staff') {
-        socket.join('staff');
-      }
+      if (authType === 'staff') socket.join('staff');
+      socket.emit('support:connected', { ok: true, auth_type: authType, conversation_id: null });
     } else if (authType === 'guest') {
-      socket.emit('support:connected', {
-        ok: true,
-        auth_type: 'guest',
-        conversation_id: guest.conversation_id
-      });
-
-      // Join conversation room
       socket.join(`conversation:${guest.conversation_id}`);
+      socket.emit('support:connected', { ok: true, auth_type: 'guest', conversation_id: guest.conversation_id });
     }
 
-    // support:typing
-    socket.on('support:typing', (data) => {
+    socket.on('support:conversation:join', async (data) => {
       try {
-        const { conversation_id, is_typing } = data;
-        if (!conversation_id) {
+        const conversationId = Number(data?.conversation_id || 0);
+        if (!conversationId) {
           return socket.emit('support:error', { code: 'VALIDATION_ERROR', message: 'conversation_id required' });
         }
 
-        // Broadcast to conversation room excluding sender
-        io.to(`conversation:${conversation_id}`).except(socket.id).emit('support:typing', {
-          conversation_id,
-          is_typing: !!is_typing
+        const conversation = await repository.getConversationById(conversationId);
+        if (!conversation) {
+          return socket.emit('support:error', { code: 'ACCESS_DENIED', message: 'Conversation not found', conversation_id: conversationId });
+        }
+
+        if (authType === 'guest' && (conversation.source !== 'guest' || Number(conversation.guest_session_id) !== Number(guest.session_id))) {
+          return socket.emit('support:error', { code: 'ACCESS_DENIED', message: 'Access denied', conversation_id: conversationId });
+        }
+        if (authType === 'user' && (conversation.source !== 'authenticated' || Number(conversation.user_id) !== Number(user.sub))) {
+          return socket.emit('support:error', { code: 'ACCESS_DENIED', message: 'Access denied', conversation_id: conversationId });
+        }
+
+        if (authType === 'staff' && conversation.status === 'open' && !conversation.assigned_admin_id) {
+          await repository.claimConversation(conversationId, user.sub, user.role);
+          const summary = await repository.getConversationSummary(conversationId, user.sub, user.role);
+          const payload = { conversation_id: conversationId, conversation: summary };
+          io.to('staff').emit('support:conversation:claimed', payload);
+          io.to('staff').emit('support:conversation:updated', payload);
+        }
+
+        socket.join(`conversation:${conversationId}`);
+        socket.emit('support:conversation:joined', { conversation_id: conversationId });
+      } catch (error) {
+        logger.error('conversation_join_failed', { err_message: error.message });
+        socket.emit('support:error', { code: 'INTERNAL_ERROR', message: 'Failed to join conversation' });
+      }
+    });
+
+    socket.on('support:typing', (data) => {
+      try {
+        const conversationId = Number(data?.conversation_id || 0);
+        if (!conversationId) {
+          return socket.emit('support:error', { code: 'VALIDATION_ERROR', message: 'conversation_id required' });
+        }
+        io.to(`conversation:${conversationId}`).except(socket.id).emit('support:typing', {
+          conversation_id: conversationId,
+          is_typing: !!data?.is_typing,
+          sender_type: authType === 'staff' ? 'staff' : authType,
         });
       } catch (error) {
-        logger.error('Error handling typing', { error: error.message, socketId: socket.id });
+        logger.error('typing_failed', { err_message: error.message });
         socket.emit('support:error', { code: 'INTERNAL_ERROR', message: 'Failed to update typing status' });
       }
     });
 
-    // support:message:send
     socket.on('support:message:send', async (data) => {
       try {
-        logger.info('message_send_started', { conversation_id: data.conversation_id });
-
-        const { conversation_id, body } = data;
-        const authType = socket.data.authType;
-
-        if (!conversation_id || !body || body.trim().length === 0) {
+        const conversationId = Number(data?.conversation_id || 0);
+        const body = String(data?.body || '').trim();
+        if (!conversationId || body === '') {
           return socket.emit('support:error', { code: 'VALIDATION_ERROR', message: 'conversation_id and body required' });
         }
-
         if (body.length > 5000) {
           return socket.emit('support:error', { code: 'VALIDATION_ERROR', message: 'Message too long' });
         }
 
-        // Validate conversation access
-        let senderType, senderId;
-        const [conv] = await pool.execute('SELECT source, user_id, guest_session_id FROM support_conversations WHERE id = ?', [conversation_id]);
-        if (conv.length === 0) {
-          return socket.emit('support:error', { code: 'ACCESS_DENIED', message: 'Conversation not found' });
+        const conversation = await repository.getConversationById(conversationId);
+        if (!conversation) {
+          return socket.emit('support:error', { code: 'ACCESS_DENIED', message: 'Conversation not found', conversation_id: conversationId });
         }
 
-        const conversation = conv[0];
+        let senderType = 'user';
+        let senderId = null;
 
         if (authType === 'guest') {
-          if (conversation.source !== 'guest' || conversation.guest_session_id !== guest.session_id) {
-            return socket.emit('support:error', { code: 'ACCESS_DENIED', message: 'Access denied' });
+          if (conversation.source !== 'guest' || Number(conversation.guest_session_id) !== Number(guest.session_id)) {
+            return socket.emit('support:error', { code: 'ACCESS_DENIED', message: 'Access denied', conversation_id: conversationId });
           }
           senderType = 'guest';
-          senderId = null;
         } else if (authType === 'user') {
-          if (conversation.source !== 'authenticated' || conversation.user_id !== user.sub) {
-            return socket.emit('support:error', { code: 'ACCESS_DENIED', message: 'Access denied' });
+          if (conversation.source !== 'authenticated' || Number(conversation.user_id) !== Number(user.sub)) {
+            return socket.emit('support:error', { code: 'ACCESS_DENIED', message: 'Access denied', conversation_id: conversationId });
           }
           senderType = 'user';
           senderId = user.sub;
         } else if (authType === 'staff') {
-          // Staff can access any conversation
+          if (!repository.canStaffModify(conversation, user.sub, user.role)) {
+            return socket.emit('support:error', { code: 'ACCESS_DENIED', message: 'Conversation is not assigned to this staff member', conversation_id: conversationId });
+          }
           senderType = 'staff';
           senderId = user.sub;
         }
 
-        // Insert message
-        const [msgResult] = await pool.execute(
-          'INSERT INTO support_messages (conversation_id, sender_type, sender_id, body, created_at) VALUES (?, ?, ?, ?, NOW())',
-          [conversation_id, senderType, senderId, body.trim()]
-        );
-
-        // Update conversation updated_at
-        await pool.execute('UPDATE support_conversations SET updated_at = NOW() WHERE id = ?', [conversation_id]);
-
-        const messageId = msgResult.insertId;
-
-        // Emit to room
-        const messagePayload = {
-          conversation_id,
-          message: {
-            id: messageId,
-            sender_type: senderType,
-            body: body.trim(),
-            created_at: new Date().toISOString()
-          }
-        };
-        io.to(`conversation:${conversation_id}`).emit('support:message:new', messagePayload);
+        const message = await repository.createMessage(conversationId, senderType, senderId, body);
+        const messagePayload = { conversation_id: conversationId, message };
+        io.to(`conversation:${conversationId}`).emit('support:message:new', messagePayload);
+        socket.emit('support:message:sent', { conversation_id: conversationId, message_id: message.id, message });
+        await emitConversationUpdated(conversationId, user?.sub || 0, user?.role || 'admin');
         if (senderType === 'guest' || senderType === 'user') {
           io.to('staff').emit('support:message:new', messagePayload);
         }
 
-        // Emit to sender
-        socket.emit('support:message:sent', { conversation_id, message_id: messageId });
-
-        logger.info('message_send_success', { message_id: messageId });
+        logger.info('message_send_success', { conversation_id: conversationId, message_id: message.id, sender_type: senderType });
       } catch (error) {
-        logger.error('message_send_failed', { error: error.message });
+        logger.error('message_send_failed', { err_message: error.message });
         socket.emit('support:error', { code: 'INTERNAL_ERROR', message: 'Failed to send message' });
       }
     });

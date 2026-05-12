@@ -1,118 +1,102 @@
 const ConversationRepository = require('../repositories/conversationRepository');
 const logger = require('../utils/logger');
 
+const STAFF_ROLES = new Set(['admin', 'support', 'staff']);
+
 class ConversationService {
   constructor() {
     this.repository = new ConversationRepository();
   }
 
-  async getConversations(userId, role, page = 1, limit = 25) {
-    try {
-      logger.info('conversations_list_started', { user_id: userId, role, page, limit });
-
-      // For users, get their conversations (authenticated ones)
-      // For staff/admin, get all conversations
-      logger.info('conversations_query_started', { user_id: userId, role });
-      const conversations = await this.repository.getConversations(userId, role, page, limit);
-      const total = await this.repository.getConversationCount(userId, role);
-      logger.info('conversations_query_success', { user_id: userId, role, conversation_count: conversations.length, total, simplified: true });
-
-      return {
-        conversations,
-        pagination: {
-          page,
-          limit,
-          total,
-          pages: Math.ceil(total / limit)
-        }
-      };
-    } catch (error) {
-      logger.error('conversations_list_failed', {
-        user_id: userId,
-        role,
-        page,
-        limit,
-        err_name: error.name,
-        err_message: error.message,
-        err_code: error.code,
-        err_errno: error.errno,
-        err_sqlState: error.sqlState,
-        err_sqlMessage: error.sqlMessage
-      });
-      throw error;
-    }
+  isStaffRole(role) {
+    return STAFF_ROLES.has(String(role || '').toLowerCase());
   }
 
-  async getMessages(conversationId, userId, role, page = 1, limit = 25) {
-    // Check access
-    if (role === 'user') {
-      const conv = await this.repository.getConversationById(conversationId);
-      if (!conv || conv.user_id !== userId) {
-        throw new Error('Access denied');
-      }
+  async getConversations(userId, role, filters = {}, page = 1, limit = 25) {
+    logger.info('conversations_list_started', { user_id: userId, role, page, limit, filters: Object.keys(filters) });
+    const conversations = await this.repository.getConversations(userId, role, filters, page, limit);
+    const total = await this.repository.getConversationCount(userId, role, filters);
+
+    return {
+      conversations,
+      pagination: {
+        page,
+        limit,
+        total,
+        pages: Math.ceil(total / limit),
+      },
+    };
+  }
+
+  async getMessages(conversationId, userId, role, page = 1, limit = 50) {
+    const conversation = await this.repository.getConversationById(conversationId);
+    if (!conversation) throw new Error('Access denied');
+
+    if (!this.isStaffRole(role) && conversation.user_id !== userId) {
+      throw new Error('Access denied');
     }
 
     const messages = await this.repository.getMessages(conversationId, page, limit);
     const total = await this.repository.getMessageCount(conversationId);
 
-    // Filter internal messages for users
-    const filteredMessages = role === 'user' ? messages.filter(m => !m.is_internal) : messages;
-
     return {
-      messages: filteredMessages,
+      messages,
       pagination: {
         page,
         limit,
         total,
-        pages: Math.ceil(total / limit)
-      }
+        pages: Math.ceil(total / limit),
+      },
     };
   }
 
   async markRead(conversationId, userId, role) {
-    // Check access
-    if (role === 'user') {
-      const conv = await this.repository.getConversationById(conversationId);
-      if (!conv || conv.user_id !== userId) {
-        throw new Error('Access denied');
-      }
-    }
+    const conversation = await this.repository.getConversationById(conversationId);
+    if (!conversation) throw new Error('Access denied');
+    if (!this.isStaffRole(role) && conversation.user_id !== userId) throw new Error('Access denied');
 
     const result = await this.repository.markConversationRead(conversationId, role, userId);
-    const unreadCount = await this.repository.getUnreadCount(userId, role);
-
     return {
       conversation_id: conversationId,
       last_read_message_id: result.lastMessageId,
       last_read_at: result.lastReadAt,
-      unread_count: unreadCount
     };
   }
 
-  async updateStatus(conversationId, status, userId, role) {
-    const updated = await this.repository.updateConversationStatus(conversationId, status, role);
-    return updated;
+  async claimConversation(conversationId, userId, role) {
+    return this.repository.claimConversation(conversationId, userId, role);
   }
 
-  async updateAssignment(conversationId, assignedAdminId, userId, role) {
-    const updated = await this.repository.updateConversationAssignment(conversationId, assignedAdminId, role);
-    return updated;
+  async releaseConversation(conversationId, userId, role) {
+    return this.repository.releaseConversation(conversationId, userId, role);
+  }
+
+  async assignConversation(conversationId, assignedAdminId, userId, role) {
+    return this.repository.assignConversation(conversationId, assignedAdminId, userId, role);
+  }
+
+  async updateStatus(conversationId, status, userId, role) {
+    return this.repository.updateConversationStatus(conversationId, status, userId, role);
   }
 
   async sendMessage(conversationId, userId, role, body) {
-    // Check access
-    if (role === 'user') {
-      const conv = await this.repository.getConversationById(conversationId);
-      if (!conv || conv.user_id !== userId) {
+    const conversation = await this.repository.getConversationById(conversationId);
+    if (!conversation) throw new Error('Access denied');
+
+    if (this.isStaffRole(role)) {
+      if (!this.repository.canStaffModify(conversation, userId, role)) {
         throw new Error('Access denied');
       }
+    } else if (conversation.user_id !== userId) {
+      throw new Error('Access denied');
     }
 
-    const senderType = role === 'user' ? 'user' : 'staff';
-    const messageId = await this.repository.createMessage(conversationId, senderType, userId, body);
-    await this.repository.updateConversationLastMessage(conversationId);
+    const senderType = this.isStaffRole(role) ? 'staff' : 'user';
+    return this.repository.createMessage(conversationId, senderType, userId, body);
+  }
 
-    return messageId;
+  async getConversationSummary(conversationId, userId, role) {
+    return this.repository.getConversationSummary(conversationId, userId, role);
   }
 }
 
