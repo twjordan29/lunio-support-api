@@ -163,8 +163,12 @@ class GuestController {
   async endConversation(req, res) {
     try {
       const conversationId = Number(req.params.id);
+      const tokenConversationId = Number(req.guest?.conversation_id || 0);
       if (isNaN(conversationId)) {
         return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Invalid conversation ID' } });
+      }
+      if (!tokenConversationId || tokenConversationId !== conversationId) {
+        return res.status(403).json({ ok: false, error: { code: 'ACCESS_DENIED', message: 'Access denied' } });
       }
 
       // Verify the guest has access to this conversation
@@ -190,17 +194,19 @@ class GuestController {
         updated_at: new Date().toISOString(),
       };
 
-      this.io.emit('support:conversation:status_changed', {
-        conversation_id: conversationId,
-        status: 'closed',
-        conversation: summary,
-      });
+      if (this.io) {
+        this.io.emit('support:conversation:status_changed', {
+          conversation_id: conversationId,
+          status: 'closed',
+          conversation: summary,
+        });
 
-      this.io.to(`conversation_${conversationId}`).emit('support:conversation:status_changed', {
-        conversation_id: conversationId,
-        status: 'closed',
-        conversation: summary,
-      });
+        this.io.to(`conversation_${conversationId}`).emit('support:conversation:status_changed', {
+          conversation_id: conversationId,
+          status: 'closed',
+          conversation: summary,
+        });
+      }
 
       return res.json({ ok: true });
     } catch (error) {
