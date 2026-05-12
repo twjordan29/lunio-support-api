@@ -225,6 +225,31 @@ class ConversationRepository {
     return this.getConversationById(id);
   }
 
+  async autoCloseGuestConversation(conversationId) {
+    console.debug('[repo] auto-closing guest conversation:', conversationId);
+    const conversation = await this.getConversationById(conversationId);
+    if (!conversation) {
+      console.debug('[repo] conversation not found for auto-close');
+      return null;
+    }
+    if (conversation.status !== 'open') {
+      console.debug('[repo] conversation not open, skipping auto-close. status:', conversation.status);
+      return null;
+    }
+    if (conversation.source !== 'guest') {
+      console.debug('[repo] conversation not guest source, skipping auto-close. source:', conversation.source);
+      return null;
+    }
+
+    console.debug('[repo] performing auto-close update');
+    const updates = ['status = ?', 'updated_at = NOW()', 'closed_at = NOW()'];
+    const values = ['closed', conversationId];
+
+    await pool.execute(`UPDATE support_conversations SET ${updates.join(', ')} WHERE id = ?`, values);
+    console.debug('[repo] auto-close update successful');
+    return this.getConversationById(conversationId);
+  }
+
   async markConversationRead(conversationId, role, participantId) {
     const participantType = this.isStaffRole(role) ? 'staff' : role === 'guest' ? 'guest' : 'user';
     const [msgRows] = await pool.execute(
