@@ -15,33 +15,41 @@ module.exports = (io) => {
   };
 
   io.use((socket, next) => {
+    console.debug('[socket-auth] auth started, auth keys:', Object.keys(socket.handshake.auth || {}));
     const token = socket.handshake.auth?.token;
     const guestToken = socket.handshake.auth?.guest_token;
 
     if (token) {
       try {
+        console.debug('[socket-auth] verifying auth token');
         const user = verifyAuthToken(token);
         socket.data.user = user;
         socket.data.authType = STAFF_ROLES.has(String(user.role || '').toLowerCase()) ? 'staff' : 'user';
+        console.debug('[socket-auth] auth success, user:', user.id, 'role:', user.role, 'authType:', socket.data.authType);
         return next();
       } catch (error) {
-        logger.info('socket_auth_failed', { error: 'invalid auth token' });
+        console.debug('[socket-auth] auth failed:', error.message);
+        logger.info('socket_auth_failed', { error: 'invalid auth token', details: error.message });
         return next(new Error('Invalid authentication token'));
       }
     }
 
     if (guestToken) {
       try {
+        console.debug('[socket-auth] verifying guest token');
         const guest = verifyGuestToken(guestToken);
         socket.data.guest = guest;
         socket.data.authType = 'guest';
+        console.debug('[socket-auth] guest auth success, conversation:', guest.conversation_id);
         return next();
       } catch (error) {
-        logger.info('socket_auth_failed', { error: 'invalid guest token' });
+        console.debug('[socket-auth] guest auth failed:', error.message);
+        logger.info('socket_auth_failed', { error: 'invalid guest token', details: error.message });
         return next(new Error('Invalid guest token'));
       }
     }
 
+    console.debug('[socket-auth] no token provided');
     logger.info('socket_auth_failed', { error: 'no token provided' });
     return next(new Error('Authentication token required'));
   });
