@@ -92,6 +92,43 @@ class GuestController {
     }
   }
 
+  async getMessages(req, res) {
+    try {
+      const conversationId = parseInt(req.params.id, 10);
+      const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+      const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 25, 1), 100);
+      const tokenConversationId = Number(req.guest?.conversation_id || 0);
+
+      if (!conversationId || tokenConversationId !== conversationId) {
+        return res.status(403).json({ ok: false, error: { code: 'ACCESS_DENIED', message: 'Access denied' } });
+      }
+
+      const offset = (page - 1) * limit;
+      const [messages] = await pool.execute(
+        'SELECT id, conversation_id, sender_type, sender_id, body, created_at FROM support_messages WHERE conversation_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?',
+        [conversationId, limit, offset]
+      );
+      const [totalRows] = await pool.execute('SELECT COUNT(*) AS count FROM support_messages WHERE conversation_id = ?', [conversationId]);
+      const total = Number(totalRows?.[0]?.count || 0);
+
+      return res.json({
+        ok: true,
+        data: {
+          messages: messages.reverse(),
+          pagination: {
+            page,
+            limit,
+            total,
+            pages: Math.ceil(total / limit),
+          },
+        },
+      });
+    } catch (error) {
+      logger.error('guest_messages_fetch_failed', { code: error.code, name: error.name, message: error.message });
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Internal server error' } });
+    }
+  }
+
 
 }
 

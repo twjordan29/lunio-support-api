@@ -138,7 +138,7 @@ module.exports = (io) => {
         const messageId = msgResult.insertId;
 
         // Emit to room
-        io.to(`conversation:${conversation_id}`).emit('support:message:new', {
+        const messagePayload = {
           conversation_id,
           message: {
             id: messageId,
@@ -146,7 +146,11 @@ module.exports = (io) => {
             body: body.trim(),
             created_at: new Date().toISOString()
           }
-        });
+        };
+        io.to(`conversation:${conversation_id}`).emit('support:message:new', messagePayload);
+        if (senderType === 'guest' || senderType === 'user') {
+          io.to('staff').emit('support:message:new', messagePayload);
+        }
 
         // Emit to sender
         socket.emit('support:message:sent', { conversation_id, message_id: messageId });
