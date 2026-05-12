@@ -160,6 +160,55 @@ class GuestController {
     }
   }
 
+  async endConversation(req, res) {
+    try {
+      const conversationId = Number(req.params.id);
+      if (isNaN(conversationId)) {
+        return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Invalid conversation ID' } });
+      }
+
+      // Verify the guest has access to this conversation
+      const [rows] = await pool.execute(
+        'SELECT id FROM support_conversations WHERE id = ? AND source = "guest"',
+        [conversationId]
+      );
+
+      if (rows.length === 0) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Conversation not found' } });
+      }
+
+      // Update status to closed
+      await pool.execute(
+        'UPDATE support_conversations SET status = "closed", closed_at = NOW(), updated_at = NOW() WHERE id = ?',
+        [conversationId]
+      );
+
+      // Emit realtime update
+      const summary = {
+        id: conversationId,
+        status: 'closed',
+        updated_at: new Date().toISOString(),
+      };
+
+      this.io.emit('support:conversation:status_changed', {
+        conversation_id: conversationId,
+        status: 'closed',
+        conversation: summary,
+      });
+
+      this.io.to(`conversation_${conversationId}`).emit('support:conversation:status_changed', {
+        conversation_id: conversationId,
+        status: 'closed',
+        conversation: summary,
+      });
+
+      return res.json({ ok: true });
+    } catch (error) {
+      logger.error('guest_end_conversation_failed', { code: error.code, name: error.name, message: error.message });
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Internal server error' } });
+    }
+  }
+
 
 }
 
