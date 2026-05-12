@@ -64,20 +64,28 @@ module.exports = (io) => {
       if (authType === 'staff') socket.join('staff');
       socket.emit('support:connected', { ok: true, auth_type: authType, conversation_id: null });
     } else if (authType === 'guest') {
+      console.debug('[socket] guest connected, conversation:', guest.conversation_id);
       socket.join(`conversation:${guest.conversation_id}`);
       socket.emit('support:connected', { ok: true, auth_type: 'guest', conversation_id: guest.conversation_id });
     }
 
-    socket.on('disconnect', async () => {
-      console.debug('[socket] disconnect, authType:', authType);
+    socket.on('disconnect', async (reason) => {
+      console.debug('[socket] disconnect, authType:', authType, 'reason:', reason);
       if (authType === 'guest' && guest?.conversation_id) {
         try {
           console.debug('[socket] auto-closing guest conversation:', guest.conversation_id);
-          await repository.updateConversationStatus(guest.conversation_id, 'closed', null, 'guest');
-          const summary = { id: guest.conversation_id, status: 'closed', updated_at: new Date().toISOString() };
-          io.to('staff').emit('support:conversation:status_changed', { conversation_id: guest.conversation_id, status: 'closed', conversation: summary });
-          io.to('staff').emit('support:conversation:updated', { conversation_id: guest.conversation_id, conversation: summary });
-          io.to(`conversation:${guest.conversation_id}`).emit('support:conversation:status_changed', { conversation_id: guest.conversation_id, status: 'closed', conversation: summary });
+          // Check if conversation is still open
+          const conversation = await repository.getConversationById(guest.conversation_id);
+          if (conversation && conversation.status === 'open') {
+            await repository.updateConversationStatus(guest.conversation_id, 'closed', null, 'guest');
+            const summary = { id: guest.conversation_id, status: 'closed', updated_at: new Date().toISOString() };
+            io.to('staff').emit('support:conversation:status_changed', { conversation_id: guest.conversation_id, status: 'closed', conversation: summary });
+            io.to('staff').emit('support:conversation:updated', { conversation_id: guest.conversation_id, conversation: summary });
+            io.to(`conversation:${guest.conversation_id}`).emit('support:conversation:status_changed', { conversation_id: guest.conversation_id, status: 'closed', conversation: summary });
+            console.debug('[socket] auto-closed guest conversation successfully');
+          } else {
+            console.debug('[socket] guest conversation already closed or not open');
+          }
         } catch (error) {
           console.error('[socket] failed to auto-close guest conversation:', error);
         }
