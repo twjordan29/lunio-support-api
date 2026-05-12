@@ -68,6 +68,22 @@ module.exports = (io) => {
       socket.emit('support:connected', { ok: true, auth_type: 'guest', conversation_id: guest.conversation_id });
     }
 
+    socket.on('disconnect', async () => {
+      console.debug('[socket] disconnect, authType:', authType);
+      if (authType === 'guest' && guest?.conversation_id) {
+        try {
+          console.debug('[socket] auto-closing guest conversation:', guest.conversation_id);
+          await repository.updateConversationStatus(guest.conversation_id, 'closed', null, 'guest');
+          const summary = { id: guest.conversation_id, status: 'closed', updated_at: new Date().toISOString() };
+          io.to('staff').emit('support:conversation:status_changed', { conversation_id: guest.conversation_id, status: 'closed', conversation: summary });
+          io.to('staff').emit('support:conversation:updated', { conversation_id: guest.conversation_id, conversation: summary });
+          io.to(`conversation:${guest.conversation_id}`).emit('support:conversation:status_changed', { conversation_id: guest.conversation_id, status: 'closed', conversation: summary });
+        } catch (error) {
+          console.error('[socket] failed to auto-close guest conversation:', error);
+        }
+      }
+    });
+
     socket.on('support:conversation:join', async (data) => {
       try {
         const conversationId = Number(data?.conversation_id || 0);
