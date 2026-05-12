@@ -1,56 +1,86 @@
 const pool = require('../config/db');
+const logger = require('../utils/logger');
 
 class ConversationRepository {
   async getConversations(userId, role, page = 1, limit = 25) {
-    const offset = (page - 1) * limit;
+    try {
+      logger.info('repository_get_conversations_started', { user_id: userId, role, page, limit });
 
-    let whereClause = '';
-    let params = [userId, limit, offset];
+      const offset = (page - 1) * limit;
 
-    if (role === 'user') {
-      whereClause = 'WHERE sc.user_id = ?';
-    } else {
-      // admin/support see all
+      let whereClause = '';
+      let params = [];
+
+      if (role === 'user') {
+        whereClause = 'WHERE sc.user_id = ?';
+      } else {
+        // admin/support see all
+      }
+
+      // Temporary simplified query for debugging
+      const query = `
+        SELECT
+          sc.*
+        FROM support_conversations sc
+        ${whereClause}
+        ORDER BY sc.created_at DESC
+        LIMIT ? OFFSET ?
+      `;
+
+      if (role === 'user') {
+        params.push(userId);
+      }
+      params.push(limit, offset);
+
+      logger.info('repository_sql_execute', { user_id: userId, role, param_count: params.length });
+      const [rows] = await pool.execute(query, params);
+      logger.info('repository_get_conversations_success', { user_id: userId, role, row_count: rows.length });
+
+      return rows;
+    } catch (error) {
+      logger.error('repository_get_conversations_failed', {
+        user_id: userId,
+        role,
+        page,
+        limit,
+        err_message: error.message,
+        err_code: error.code,
+        err_errno: error.errno,
+        err_sqlState: error.sqlState,
+        err_sqlMessage: error.sqlMessage
+      });
+      throw error;
     }
-
-    const query = `
-      SELECT
-        sc.*,
-        (SELECT body FROM support_messages sm WHERE sm.conversation_id = sc.id ORDER BY sm.created_at DESC LIMIT 1) as latest_message,
-        (SELECT sender_type FROM support_messages sm WHERE sm.conversation_id = sc.id ORDER BY sm.created_at DESC LIMIT 1) as latest_message_sender_type,
-        (SELECT created_at FROM support_messages sm WHERE sm.conversation_id = sc.id ORDER BY sm.created_at DESC LIMIT 1) as latest_message_at,
-        (SELECT COUNT(*) FROM support_messages sm WHERE sm.conversation_id = sc.id) as message_count,
-        COALESCE((
-          SELECT COUNT(*) FROM support_messages sm
-          WHERE sm.conversation_id = sc.id
-          AND sm.id > COALESCE((
-            SELECT last_read_message_id FROM support_conversation_participants scp
-            WHERE scp.conversation_id = sc.id AND scp.participant_type = ? AND scp.participant_id = ?
-          ), 0)
-        ), 0) as unread_count
-      FROM support_conversations sc
-      ${whereClause}
-      ORDER BY sc.last_message_at DESC, sc.created_at DESC
-      LIMIT ? OFFSET ?
-    `;
-
-    const participantType = role === 'user' ? 'user' : 'staff';
-    params.splice(1, 0, participantType, userId); // Insert before limit
-
-    const [rows] = await pool.execute(query, params);
-    return rows;
   }
 
   async getConversationCount(userId, role) {
-    let whereClause = '';
-    let params = [userId];
+    try {
+      let whereClause = '';
+      let params = [];
 
-    if (role === 'user') {
-      whereClause = 'WHERE user_id = ?';
+      if (role === 'user') {
+        whereClause = 'WHERE user_id = ?';
+        params.push(userId);
+      }
+
+      const query = `SELECT COUNT(*) as count FROM support_conversations ${whereClause}`;
+      logger.info('repository_get_conversation_count_execute', { user_id: userId, role });
+      const [rows] = await pool.execute(query, params);
+      logger.info('repository_get_conversation_count_success', { user_id: userId, role, count: rows[0].count });
+
+      return rows[0].count;
+    } catch (error) {
+      logger.error('repository_get_conversation_count_failed', {
+        user_id: userId,
+        role,
+        err_message: error.message,
+        err_code: error.code,
+        err_errno: error.errno,
+        err_sqlState: error.sqlState,
+        err_sqlMessage: error.sqlMessage
+      });
+      throw error;
     }
-
-    const [rows] = await pool.execute(`SELECT COUNT(*) as count FROM support_conversations ${whereClause}`, params);
-    return rows[0].count;
   }
 
   async getMessages(conversationId, page = 1, limit = 25) {

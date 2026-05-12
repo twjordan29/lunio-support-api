@@ -15,7 +15,7 @@ class ConversationService {
       logger.info('conversations_query_started', { user_id: userId, role });
       const conversations = await this.repository.getConversations(userId, role, page, limit);
       const total = await this.repository.getConversationCount(userId, role);
-      logger.info('conversations_query_success', { user_id: userId, role, conversation_count: conversations.length, total });
+      logger.info('conversations_query_success', { user_id: userId, role, conversation_count: conversations.length, total, simplified: true });
 
       return {
         conversations,
