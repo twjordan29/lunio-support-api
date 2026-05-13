@@ -5,6 +5,7 @@ const { authenticateToken } = require('../middleware/auth');
 
 const controller = new ConversationController();
 
+router.get('/conversations/unread-count', authenticateToken, controller.getUnreadCount.bind(controller));
 router.get('/conversations', authenticateToken, controller.getConversations.bind(controller));
 router.get('/conversations/:id/messages', authenticateToken, controller.getMessages.bind(controller));
 router.post('/conversations/:id/messages', authenticateToken, controller.sendMessage.bind(controller));

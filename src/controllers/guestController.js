@@ -1,5 +1,6 @@
 const crypto = require('crypto');
 const ConversationService = require('../services/conversationService');
+const PushNotificationService = require('../services/pushNotificationService');
 const { generateGuestToken } = require('../services/tokenService');
 const logger = require('../utils/logger');
 const pool = require('../config/db');
@@ -7,6 +8,7 @@ const pool = require('../config/db');
 class GuestController {
   constructor() {
     this.service = new ConversationService();
+    this.pushNotifications = new PushNotificationService();
   }
 
   async startConversation(req, res) {
@@ -73,36 +75,49 @@ class GuestController {
 
       logger.info('guest_token_issued', { conversation_id: conversationId });
 
+      const messagePayload = {
+        id: messageId,
+        conversation_id: conversationId,
+        sender_type: 'guest',
+        sender_id: null,
+        body: body.trim(),
+        created_at: new Date().toISOString(),
+        read_at: null,
+      };
+      const conversation = {
+        id: conversationId,
+        source: 'guest',
+        status: 'open',
+        assigned_admin_id: null,
+        assigned_admin_name: null,
+        customer_name: name || 'Guest',
+        customer_email: email || null,
+        latest_message: messagePayload.body,
+        latest_message_sender_type: 'guest',
+        latest_message_at: messagePayload.created_at,
+        unread_count: 1,
+        message_count: 1,
+        created_at: messagePayload.created_at,
+        updated_at: messagePayload.created_at,
+      };
+      logger.info('support_message_created', {
+        message_id: messageId,
+        conversation_id: conversationId,
+        sender_type: 'guest',
+        sender_user_id: null,
+        conversation_assigned_staff_id: null,
+        conversation_status: 'open',
+        should_dispatch_push: true
+      });
+      await this.pushNotifications.notifyForMessage(conversation, messagePayload);
+
       const io = req.app.get('io');
       if (io) {
-        const messagePayload = {
-          id: messageId,
-          conversation_id: conversationId,
-          sender_type: 'guest',
-          sender_id: null,
-          body: body.trim(),
-          created_at: new Date().toISOString(),
-          read_at: null,
-        };
-        const conversation = {
-          id: conversationId,
-          source: 'guest',
-          status: 'open',
-          assigned_admin_id: null,
-          assigned_admin_name: null,
-          customer_name: name || 'Guest',
-          customer_email: email || null,
-          latest_message: messagePayload.body,
-          latest_message_sender_type: 'guest',
-          latest_message_at: messagePayload.created_at,
-          unread_count: 1,
-          message_count: 1,
-          created_at: messagePayload.created_at,
-          updated_at: messagePayload.created_at,
-        };
         io.to('staff').emit('support:message:new', { conversation_id: conversationId, message: messagePayload });
         io.to('staff').emit('support:conversation:updated', { conversation_id: conversationId, conversation });
       }
+      logger.info('support_message_created', { conversation_id: conversationId, message_id: messageId, sender_type: 'guest', assigned_admin_id: null, status: 'open' });
+      await this.pushNotifications.notifyForMessage(conversation, messagePayload);
 
       res.json({
         ok: true,

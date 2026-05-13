@@ -1,11 +1,13 @@
 const logger = require('../utils/logger');
 const { verifyAuthToken, verifyGuestToken } = require('../services/tokenService');
 const ConversationRepository = require('../repositories/conversationRepository');
+const PushNotificationService = require('../services/pushNotificationService');
 
 const STAFF_ROLES = new Set(['admin', 'support', 'staff']);
 
 module.exports = (io) => {
   const repository = new ConversationRepository();
+  const pushNotifications = new PushNotificationService();
 
   const emitConversationUpdated = async (conversationId, userId, role) => {
     const conversation = await repository.getConversationSummary(conversationId, userId, role);
@@ -23,9 +25,13 @@ module.exports = (io) => {
       try {
         console.debug('[socket-auth] verifying auth token');
         const user = verifyAuthToken(token);
+        if (!user || !user.sub) {
+          console.debug('[socket-auth] auth failed: missing user.sub in token');
+          return next(new Error('Invalid authentication token: missing user ID'));
+        }
         socket.data.user = user;
         socket.data.authType = STAFF_ROLES.has(String(user.role || '').toLowerCase()) ? 'staff' : 'user';
-        console.debug('[socket-auth] auth success, user:', user.id, 'role:', user.role, 'authType:', socket.data.authType);
+        console.debug('[socket-auth] auth success, user:', user.sub, 'role:', user.role, 'authType:', socket.data.authType);
         return next();
       } catch (error) {
         console.debug('[socket-auth] auth failed:', error.message);
@@ -178,11 +184,29 @@ module.exports = (io) => {
 
         const message = await repository.createMessage(conversationId, senderType, senderId, body);
         const messagePayload = { conversation_id: conversationId, message };
+        const updatePayload = await emitConversationUpdated(conversationId, user?.sub || 0, user?.role || 'admin');
+
+        const shouldDispatchPush = senderType === 'guest' || senderType === 'user';
+        logger.info('support_message_created', {
+          message_id: message.id,
+          conversation_id: conversationId,
+          sender_type: senderType,
+          sender_user_id: senderId,
+          conversation_assigned_staff_id: updatePayload.conversation?.assigned_admin_id || conversation.assigned_admin_id || null,
+          conversation_status: updatePayload.conversation?.status || conversation.status,
+          should_dispatch_push: shouldDispatchPush
+        });
+
         io.to(`conversation:${conversationId}`).emit('support:message:new', messagePayload);
         socket.emit('support:message:sent', { conversation_id: conversationId, message_id: message.id, message });
-        await emitConversationUpdated(conversationId, user?.sub || 0, user?.role || 'admin');
+
         if (senderType === 'guest' || senderType === 'user') {
           io.to('staff').emit('support:message:new', messagePayload);
+          if (shouldDispatchPush) {
+            await pushNotifications.notifyForMessage(updatePayload.conversation || conversation, message);
+          }
+        } else if (senderType === 'staff') {
+          await repository.markConversationRead(conversationId, user.role, user.sub);
         }
 
         logger.info('message_send_success', { conversation_id: conversationId, message_id: message.id, sender_type: senderType });

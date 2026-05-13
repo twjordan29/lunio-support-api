@@ -3,6 +3,7 @@ const logger = require('../utils/logger');
 
 const STAFF_ROLES = new Set(['admin', 'support', 'staff']);
 const VALID_STATUSES = new Set(['open', 'completed', 'closed']);
+const CUSTOMER_SENDER_TYPES = new Set(['guest', 'user']);
 
 class ConversationRepository {
   isStaffRole(role) {
@@ -74,19 +75,18 @@ class ConversationRepository {
         FROM support_messages
         GROUP BY conversation_id
       ) msg_count ON msg_count.conversation_id = sc.id
-      LEFT JOIN support_conversation_participants scp
-        ON scp.conversation_id = sc.id
-        AND scp.participant_type = ?
-        AND scp.participant_id ${participantType === 'staff' ? '= ?' : '= ?'}
       LEFT JOIN (
         SELECT sm.conversation_id, COUNT(*) AS unread_count
         FROM support_messages sm
+        INNER JOIN support_conversations unread_sc
+          ON unread_sc.id = sm.conversation_id
+          AND unread_sc.status = 'open'
         LEFT JOIN support_conversation_participants rp
           ON rp.conversation_id = sm.conversation_id
           AND rp.participant_type = ?
           AND rp.participant_id = ?
         WHERE sm.id > COALESCE(rp.last_read_message_id, 0)
-          AND sm.sender_type <> ?
+          AND ${participantType === 'staff' ? "sm.sender_type IN ('guest', 'user')" : "sm.sender_type IN ('staff', 'admin', 'support')"}
         GROUP BY sm.conversation_id
       ) unread ON unread.conversation_id = sc.id
       ${whereClause}
@@ -94,7 +94,7 @@ class ConversationRepository {
       LIMIT ? OFFSET ?
     `;
 
-    const queryParams = [participantType, userId, participantType, userId, participantType, ...params, limit, offset];
+    const queryParams = [participantType, userId, ...params, limit, offset];
     logger.info('repository_get_conversations_execute', { user_id: userId, role, page, limit, filter_count: Object.keys(filters).length });
     const [rows] = await pool.execute(query, queryParams);
     return rows;
@@ -181,6 +181,27 @@ class ConversationRepository {
     return fallback[0] || null;
   }
 
+  async getUnreadCount(userId, role) {
+    const participantType = this.isStaffRole(role) ? 'staff' : 'user';
+    const unreadSenderClause = participantType === 'staff'
+      ? "sm.sender_type IN ('guest', 'user')"
+      : "sm.sender_type IN ('staff', 'admin', 'support')";
+    const [rows] = await pool.execute(`
+      SELECT COUNT(*) AS unread_count
+      FROM support_messages sm
+      INNER JOIN support_conversations sc
+        ON sc.id = sm.conversation_id
+        AND sc.status = 'open'
+      LEFT JOIN support_conversation_participants rp
+        ON rp.conversation_id = sm.conversation_id
+        AND rp.participant_type = ?
+        AND rp.participant_id = ?
+      WHERE sm.id > COALESCE(rp.last_read_message_id, 0)
+        AND ${unreadSenderClause}
+    `, [participantType, userId]);
+    return Number(rows[0]?.unread_count || 0);
+  }
+
   canStaffModify(conversation, userId, role) {
     if (!conversation || !this.isStaffRole(role)) return false;
     if (this.isAdminRole(role)) return true;
@@ -227,11 +248,19 @@ class ConversationRepository {
 
   async autoCloseGuestConversation(conversationId) {
     console.debug('[repo] auto-closing guest conversation:', conversationId);
-    const conversation = await this.getConversationById(conversationId);
-    if (!conversation) {
+
+    // Direct database update to avoid any access control issues
+    const [existing] = await pool.execute(
+      'SELECT status, source FROM support_conversations WHERE id = ?',
+      [conversationId]
+    );
+
+    if (!existing || existing.length === 0) {
       console.debug('[repo] conversation not found for auto-close');
       return null;
     }
+
+    const conversation = existing[0];
     if (conversation.status !== 'open') {
       console.debug('[repo] conversation not open, skipping auto-close. status:', conversation.status);
       return null;
@@ -242,19 +271,25 @@ class ConversationRepository {
     }
 
     console.debug('[repo] performing auto-close update');
-    const updates = ['status = ?', 'updated_at = NOW()', 'closed_at = NOW()'];
-    const values = ['closed', conversationId];
-
-    await pool.execute(`UPDATE support_conversations SET ${updates.join(', ')} WHERE id = ?`, values);
+    await pool.execute(
+      `UPDATE support_conversations SET status = 'closed', updated_at = NOW(), closed_at = NOW() WHERE id = ?`,
+      [conversationId]
+    );
     console.debug('[repo] auto-close update successful');
     return this.getConversationById(conversationId);
   }
 
   async markConversationRead(conversationId, role, participantId) {
     const participantType = this.isStaffRole(role) ? 'staff' : role === 'guest' ? 'guest' : 'user';
+    const senderTypes = participantType === 'staff'
+      ? ['guest', 'user']
+      : participantType === 'guest'
+        ? ['staff', 'admin', 'support']
+        : ['staff', 'admin', 'support'];
+    const placeholders = senderTypes.map(() => '?').join(',');
     const [msgRows] = await pool.execute(
-      'SELECT id FROM support_messages WHERE conversation_id = ? ORDER BY id DESC LIMIT 1',
-      [conversationId]
+      `SELECT id FROM support_messages WHERE conversation_id = ? AND sender_type IN (${placeholders}) ORDER BY id DESC LIMIT 1`,
+      [conversationId, ...senderTypes]
     );
     const lastMessageId = msgRows[0]?.id || null;
 
@@ -282,6 +317,10 @@ class ConversationRepository {
       [result.insertId]
     );
     return rows[0];
+  }
+
+  isCustomerSenderType(senderType) {
+    return CUSTOMER_SENDER_TYPES.has(String(senderType || '').toLowerCase());
   }
 
   async updateConversationLastMessage(conversationId) {

@@ -1,9 +1,13 @@
 const ConversationService = require('../services/conversationService');
+const PushNotificationService = require('../services/pushNotificationService');
 const logger = require('../utils/logger');
+
+const CUSTOMER_SENDER_TYPES = new Set(['guest', 'user']);
 
 class ConversationController {
   constructor() {
     this.service = new ConversationService();
+    this.pushNotifications = new PushNotificationService();
   }
 
   emitStaff(io, event, payload) {
@@ -56,6 +60,16 @@ class ConversationController {
     }
   }
 
+  async getUnreadCount(req, res) {
+    try {
+      const { sub: userId, role } = req.user;
+      const result = await this.service.getUnreadCount(userId, role);
+      return res.json({ ok: true, data: result });
+    } catch (error) {
+      return this.safeError(res, error);
+    }
+  }
+
   async markRead(req, res) {
     try {
       const conversationId = parseInt(req.params.id || req.params.conversationId, 10);
@@ -67,6 +81,7 @@ class ConversationController {
         reader_role: role,
         last_read_message_id: result.last_read_message_id,
         last_read_at: result.last_read_at,
+        unread_count: result.unread_count,
       });
       return res.json({ ok: true, data: result });
     } catch (error) {
@@ -161,6 +176,22 @@ class ConversationController {
       this.emitConversation(io, conversationId, 'support:message:new', messagePayload);
       this.emitStaff(io, 'support:conversation:updated', updatePayload);
       if (io) io.to(`user:${userId}`).emit('support:message:sent', { conversation_id: conversationId, message_id: message.id, message });
+      if (message.sender_type === 'user') this.emitStaff(io, 'support:message:new', messagePayload);
+
+      const shouldDispatchPush = CUSTOMER_SENDER_TYPES.has(message.sender_type);
+      logger.info('support_message_created', {
+        message_id: message.id,
+        conversation_id: conversationId,
+        sender_type: message.sender_type,
+        sender_user_id: message.sender_id,
+        conversation_assigned_staff_id: summary?.assigned_admin_id || null,
+        conversation_status: summary?.status || null,
+        should_dispatch_push: shouldDispatchPush
+      });
+
+      if (shouldDispatchPush) {
+        await this.pushNotifications.notifyForMessage(summary, message);
+      }
 
       return res.json({ ok: true, data: { message } });
     } catch (error) {

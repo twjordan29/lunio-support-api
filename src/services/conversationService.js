@@ -56,11 +56,18 @@ class ConversationService {
     if (!this.isStaffRole(role) && conversation.user_id !== userId) throw new Error('Access denied');
 
     const result = await this.repository.markConversationRead(conversationId, role, userId);
+    const unreadCount = await this.repository.getUnreadCount(userId, role);
+    logger.info('conversation_mark_read', { conversation_id: conversationId, user_id: userId, role, last_read_message_id: result.lastMessageId, unread_count: unreadCount });
     return {
       conversation_id: conversationId,
       last_read_message_id: result.lastMessageId,
       last_read_at: result.lastReadAt,
+      unread_count: unreadCount,
     };
+  }
+
+  async getUnreadCount(userId, role) {
+    return { unread_count: await this.repository.getUnreadCount(userId, role) };
   }
 
   async claimConversation(conversationId, userId, role) {
@@ -92,7 +99,11 @@ class ConversationService {
     }
 
     const senderType = this.isStaffRole(role) ? 'staff' : 'user';
-    return this.repository.createMessage(conversationId, senderType, userId, body);
+    const message = await this.repository.createMessage(conversationId, senderType, userId, body);
+    if (this.isStaffRole(role)) {
+      await this.repository.markConversationRead(conversationId, role, userId);
+    }
+    return message;
   }
 
   async getConversationSummary(conversationId, userId, role) {
