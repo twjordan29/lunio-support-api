@@ -8,6 +8,7 @@ const controller = new GuestController();
 // POST /api/guest/conversations/start
 router.post('/conversations/start', controller.startConversation.bind(controller));
 router.get('/conversations/:id/messages', authenticateGuest, controller.getMessages.bind(controller));
+router.post('/conversations/:id/messages', authenticateGuest, controller.sendMessage.bind(controller));
 router.post('/conversations/:id/end', authenticateGuest, controller.endConversation.bind(controller));
 
 module.exports = router;

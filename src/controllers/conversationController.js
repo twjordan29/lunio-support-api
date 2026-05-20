@@ -37,6 +37,7 @@ class ConversationController {
         status: typeof req.query.status === 'string' ? req.query.status : undefined,
         mine: String(req.query.mine || '0') === '1',
         unassigned: String(req.query.unassigned || '0') === '1',
+        search: typeof req.query.search === 'string' ? String(req.query.search).trim().slice(0, 100) : undefined,
       };
 
       const result = await this.service.getConversations(userId, role, filters, page, limit);

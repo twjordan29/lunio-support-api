@@ -2,7 +2,7 @@ const pool = require('../config/db');
 const logger = require('../utils/logger');
 
 const STAFF_ROLES = new Set(['admin', 'support', 'staff']);
-const VALID_STATUSES = new Set(['open', 'completed', 'closed']);
+const VALID_STATUSES = new Set(['open', 'pending', 'completed', 'closed']);
 const CUSTOMER_SENDER_TYPES = new Set(['guest', 'user']);
 
 class ConversationRepository {
@@ -23,6 +23,19 @@ class ConversationRepository {
       if (filters.status && VALID_STATUSES.has(filters.status)) {
         where.push('sc.status = ?');
         params.push(filters.status);
+      }
+      if (filters.search) {
+        where.push(`(
+          COALESCE(sc.visitor_name, sgs.name, '') LIKE ?
+          OR COALESCE(sc.visitor_email, sgs.email, '') LIKE ?
+          OR EXISTS (
+            SELECT 1 FROM support_messages sm_search
+            WHERE sm_search.conversation_id = sc.id
+            AND sm_search.body LIKE ?
+          )
+        )`);
+        const like = `%${filters.search}%`;
+        params.push(like, like, like);
       }
       if (filters.mine) {
         where.push('sc.assigned_admin_id = ?');
@@ -50,10 +63,10 @@ class ConversationRepository {
         sc.assigned_admin_id,
         NULL AS assigned_admin_name,
         CASE
-          WHEN sc.source = 'guest' THEN COALESCE(NULLIF(sgs.name, ''), 'Guest')
+          WHEN sc.source = 'guest' THEN COALESCE(NULLIF(sc.visitor_name, ''), NULLIF(sgs.name, ''), 'Guest')
           ELSE COALESCE(NULLIF(sc.subject, ''), 'Customer')
         END AS customer_name,
-        CASE WHEN sc.source = 'guest' THEN sgs.email ELSE NULL END AS customer_email,
+        CASE WHEN sc.source = 'guest' THEN COALESCE(sc.visitor_email, sgs.email) ELSE NULL END AS customer_email,
         lm.body AS latest_message,
         lm.sender_type AS latest_message_sender_type,
         lm.created_at AS latest_message_at,
@@ -109,6 +122,19 @@ class ConversationRepository {
         where.push('status = ?');
         params.push(filters.status);
       }
+      if (filters.search) {
+        where.push(`(
+          COALESCE(visitor_name, '') LIKE ?
+          OR COALESCE(visitor_email, '') LIKE ?
+          OR EXISTS (
+            SELECT 1 FROM support_messages sm_search
+            WHERE sm_search.conversation_id = support_conversations.id
+            AND sm_search.body LIKE ?
+          )
+        )`);
+        const like = `%${filters.search}%`;
+        params.push(like, like, like);
+      }
       if (filters.mine) {
         where.push('assigned_admin_id = ?');
         params.push(userId);
@@ -150,10 +176,6 @@ class ConversationRepository {
   }
 
   async getConversationSummary(id, userId, role) {
-    const rows = await this.getConversations(userId, role, {}, 1, 1);
-    const summary = rows.find(row => Number(row.id) === Number(id));
-    if (summary) return summary;
-
     const [fallback] = await pool.execute(`
       SELECT
         sc.id,
@@ -162,10 +184,10 @@ class ConversationRepository {
         sc.assigned_admin_id,
         NULL AS assigned_admin_name,
         CASE
-          WHEN sc.source = 'guest' THEN COALESCE(NULLIF(sgs.name, ''), 'Guest')
+          WHEN sc.source = 'guest' THEN COALESCE(NULLIF(sc.visitor_name, ''), NULLIF(sgs.name, ''), 'Guest')
           ELSE COALESCE(NULLIF(sc.subject, ''), 'Customer')
         END AS customer_name,
-        CASE WHEN sc.source = 'guest' THEN sgs.email ELSE NULL END AS customer_email,
+        CASE WHEN sc.source = 'guest' THEN COALESCE(sc.visitor_email, sgs.email) ELSE NULL END AS customer_email,
         NULL AS latest_message,
         NULL AS latest_message_sender_type,
         sc.last_message_at AS latest_message_at,

@@ -13,7 +13,7 @@ class GuestController {
 
   async startConversation(req, res) {
     try {
-      const { name, email, message: body } = req.body;
+      const { name, email, message: body, page_url: pageUrl } = req.body;
 
       // Validate
       if (!name || !email || !body) {
@@ -48,9 +48,9 @@ class GuestController {
 
       // Create support conversation
       const [convResult] = await pool.execute(`
-        INSERT INTO support_conversations (source, status, guest_session_id, created_at, updated_at)
-        VALUES ('guest', 'open', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-      `, [sessionId]);
+        INSERT INTO support_conversations (source, status, guest_session_id, visitor_name, visitor_email, page_url, created_at, updated_at)
+        VALUES ('guest', 'open', ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+      `, [sessionId, name.trim(), email.trim(), typeof pageUrl === 'string' ? pageUrl.slice(0, 2000) : null]);
       const conversationId = convResult.insertId;
 
       logger.info('guest_conversation_created', { conversation_id: conversationId });
@@ -117,7 +117,6 @@ class GuestController {
         io.to('staff').emit('support:conversation:updated', { conversation_id: conversationId, conversation });
       }
       logger.info('support_message_created', { conversation_id: conversationId, message_id: messageId, sender_type: 'guest', assigned_admin_id: null, status: 'open' });
-      await this.pushNotifications.notifyForMessage(conversation, messagePayload);
 
       res.json({
         ok: true,
@@ -175,6 +174,45 @@ class GuestController {
     }
   }
 
+  async sendMessage(req, res) {
+    try {
+      const conversationId = Number(req.params.id);
+      const tokenConversationId = Number(req.guest?.conversation_id || 0);
+      const body = String(req.body?.body || '').trim();
+      if (!conversationId || conversationId !== tokenConversationId) {
+        return res.status(403).json({ ok: false, error: { code: 'ACCESS_DENIED', message: 'Access denied' } });
+      }
+      if (!body) {
+        return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Message body required' } });
+      }
+      if (body.length > 5000) {
+        return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Message too long' } });
+      }
+
+      const [msgResult] = await pool.execute(
+        `INSERT INTO support_messages (conversation_id, sender_type, body, created_at) VALUES (?, 'guest', ?, CURRENT_TIMESTAMP)`,
+        [conversationId, body]
+      );
+      await pool.execute(`UPDATE support_conversations SET last_message_at = NOW(), updated_at = NOW() WHERE id = ?`, [conversationId]);
+      const [rows] = await pool.execute(
+        'SELECT id, conversation_id, sender_type, sender_id, body, created_at, read_at FROM support_messages WHERE id = ?',
+        [msgResult.insertId]
+      );
+      const message = rows[0] || null;
+
+      const io = req.app.get('io');
+      if (io && message) {
+        io.to('staff').emit('support:message:new', { conversation_id: conversationId, message });
+        io.to(`conversation:${conversationId}`).emit('support:message:new', { conversation_id: conversationId, message });
+      }
+
+      return res.json({ ok: true, data: { message } });
+    } catch (error) {
+      logger.error('guest_send_message_failed', { code: error.code, name: error.name, message: error.message });
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Internal server error' } });
+    }
+  }
+
   async endConversation(req, res) {
     try {
       const conversationId = Number(req.params.id);
@@ -209,14 +247,15 @@ class GuestController {
         updated_at: new Date().toISOString(),
       };
 
-      if (this.io) {
-        this.io.emit('support:conversation:status_changed', {
+      const io = req.app.get('io');
+      if (io) {
+        io.emit('support:conversation:status_changed', {
           conversation_id: conversationId,
           status: 'closed',
           conversation: summary,
         });
 
-        this.io.to(`conversation_${conversationId}`).emit('support:conversation:status_changed', {
+        io.to(`conversation:${conversationId}`).emit('support:conversation:status_changed', {
           conversation_id: conversationId,
           status: 'closed',
           conversation: summary,
